@@ -1,0 +1,24 @@
+{
+  "name": "@agentos/cli",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "agentos": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@agentos/api": "workspace:*",
+    "@agentos/types": "workspace:*",
+    "e2b": "2.61.0",
+    "postgres": "3.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "agentos",
+  "private": true,
+  "version": "0.0.1",
+  "description": "AgentOS: managed agents you can run locally or in the cloud, on any OpenRouter model, with an Anthropic Managed Agents-compatible API.",
+  "license": "MIT",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @agentos/api --filter @agentos/console dev",
+    "dev:api": "pnpm --filter @agentos/api dev",
+    "dev:console": "pnpm --filter @agentos/console dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test:conformance": "pnpm --filter @agentos/conformance test",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:reset": "supabase db reset",
+    "agentos": "tsx apps/cli/src/index.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

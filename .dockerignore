@@ -1,0 +1,6 @@
+**/node_modules
+**/dist
+.agentos
+.git
+tests
+**/*.log
