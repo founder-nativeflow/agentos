@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Outlet } from "react-router-dom";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "./app-sidebar";
+import { WorkspaceSwitcher } from "./workspace-switcher";
 
 export function AppLayout() {
   return (
@@ -10,7 +11,7 @@ export function AppLayout() {
       <SidebarInset className="min-w-0">
         <header className="flex h-12 items-center gap-2 border-b px-4">
           <SidebarTrigger />
-          <span className="text-sm text-muted-foreground">Default workspace</span>
+          <WorkspaceSwitcher />
         </header>
         <main className="min-w-0 flex-1 p-6">
           <Outlet />

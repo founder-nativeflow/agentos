@@ -71,7 +71,7 @@ export function AppSidebar() {
           </div>
           <div className="leading-tight">
             <div className="text-sm font-semibold">AgentOS</div>
-            <div className="text-xs text-muted-foreground">Local</div>
+            <div className="text-xs text-muted-foreground">{me.data?.mode === "supabase" ? "Cloud" : "Local"}</div>
           </div>
         </div>
       </SidebarHeader>

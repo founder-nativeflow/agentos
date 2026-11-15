@@ -11,8 +11,6 @@ import { ApiError } from "../lib/errors.js";
  */
 export const PLANNED: Array<{ prefix: string; phase: string }> = [
   { prefix: "/memory_stores", phase: "Phase 3" },
-  { prefix: "/deployments", phase: "Phase 3" },
-  { prefix: "/deployment_runs", phase: "Phase 3" },
   { prefix: "/skills", phase: "Phase 3" },
 ];
 

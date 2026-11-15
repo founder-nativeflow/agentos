@@ -2,9 +2,18 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { api } from "./api";
 
-interface Me {
+export interface Workspace {
+  id: string;
+  name: string;
+  role: "admin" | "developer" | "viewer";
+}
+
+export interface Me {
+  mode: "local" | "supabase";
   username: string;
-  actor: { type: string; id: string };
+  actor: { type: string; id: string; role: Workspace["role"]; workspace_id: string | null; email?: string };
+  workspace: Workspace | null;
+  workspaces: Workspace[];
 }
 
 export function useMe() {

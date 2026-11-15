@@ -18,13 +18,13 @@ import { SessionsPage } from "@/pages/sessions";
 import { SessionDetailPage } from "@/pages/session-detail";
 import { FilesPage } from "@/pages/files";
 import { VaultsPage } from "@/pages/vaults";
+import { DeploymentDetailPage, DeploymentsPage } from "@/pages/deployments";
 import "./index.css";
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false } } });
 
 const planned = [
   { path: "create", title: "Create", description: "Describe your agent or start from a template.", phase: "Phase 4" },
-  { path: "deployments", title: "Deployments", description: "Run agents on a schedule, by webhook or on demand.", phase: "Phase 3" },
   { path: "pipelines", title: "Pipelines", description: "Chain agents with typed hand-offs.", phase: "Phase 4" },
   { path: "memory", title: "Memory", description: "Persistent, versioned memory for agents.", phase: "Phase 3" },
   { path: "skills", title: "Skills", description: "Instructions and scripts agents load when needed.", phase: "Phase 3" },
@@ -51,6 +51,8 @@ createRoot(document.getElementById("root")!).render(
                 <Route path="sessions/:id" element={<SessionDetailPage />} />
                 <Route path="files" element={<FilesPage />} />
                 <Route path="vaults" element={<VaultsPage />} />
+                <Route path="deployments" element={<DeploymentsPage />} />
+                <Route path="deployments/:id" element={<DeploymentDetailPage />} />
                 <Route path="settings" element={<SettingsPage />} />
                 {planned.map((p) => (
                   <Route key={p.path} path={p.path} element={<PlaceholderPage title={p.title} description={p.description} phase={p.phase} />} />

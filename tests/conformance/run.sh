@@ -3,6 +3,8 @@
 # Needs local Supabase (pnpm db:start) and Docker. The model is a scripted mock,
 # so no OpenRouter key or credit is used.
 # Usage: pnpm test:conformance   (from the repo root)
+#        AGENTOS_TEST_AUTH=supabase pnpm test:conformance   (Supabase Auth mode: users,
+#        workspaces and DB-stored API keys, against the local Supabase Auth service)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -14,6 +16,8 @@ MCP_PORT="${AGENTOS_MCP_PORT:-4198}"
 ECHO_HTTP_PORT=4197
 ECHO_HTTPS_PORT=4196
 WORKSPACE="ws_test_$(date +%s)_$RANDOM"
+AUTH_MODE="${AGENTOS_TEST_AUTH:-local}"
+RUN_TAG="conf$(date +%s)$RANDOM"   # test users are ${RUN_TAG}-*@example.test
 export AGENTOS_HOME="$HOME_DIR"
 
 cleanup() {
@@ -29,6 +33,14 @@ cleanup() {
   # This run's egress proxy and sandbox network.
   docker ps -aq --filter "label=agentos.home=$HOME_DIR" | xargs docker rm -f > /dev/null 2>&1 || true
   docker network ls -q --filter "label=agentos.home=$HOME_DIR" | xargs docker network rm > /dev/null 2>&1 || true
+  # Supabase mode: this run's users and their workspaces.
+  if [[ "$AUTH_MODE" == "supabase" ]]; then
+    docker exec supabase_db_agentos psql -U postgres -qc "
+      delete from vault.secrets where id in (select c.secret_id from agentos.credentials c join agentos.vaults v on v.id = c.vault_id
+        join agentos.workspace_members m on m.workspace_id = v.workspace_id join auth.users u on u.id = m.user_id where u.email like '${RUN_TAG}-%');
+      delete from agentos.workspaces where id in (select m.workspace_id from agentos.workspace_members m join auth.users u on u.id = m.user_id where u.email like '${RUN_TAG}-%');
+      delete from auth.users where email like '${RUN_TAG}-%';" > /dev/null 2>&1 || true
+  fi
   # Vault secrets don't cascade with the workspace; remove them first.
   docker exec supabase_db_agentos psql -U postgres -qc "delete from vault.secrets where id in (select c.secret_id from agentos.credentials c join agentos.vaults v on v.id = c.vault_id where v.workspace_id = '$WORKSPACE'); delete from agentos.workspaces where id = '$WORKSPACE'" > /dev/null 2>&1 || true
   rm -rf "$HOME_DIR"
@@ -53,7 +65,12 @@ MCP_PID=$!
 ECHO_PID=$!
 for _ in $(seq 1 40); do [[ -s "$HOME_DIR/echo-ca.pem" ]] && break; sleep 0.25; done
 cd "$ROOT/apps/api"
-AGENTOS_EGRESS_UPSTREAM_CA="$HOME_DIR/echo-ca.pem" PORT="$PORT" AGENTOS_WORKSPACE="$WORKSPACE" OPENROUTER_BASE_URL="http://localhost:$MOCK_PORT" OPENROUTER_API_KEY="mock" \
+SUPA_ENV=""
+if [[ "$AUTH_MODE" == "supabase" ]]; then
+  eval "$(cd "$ROOT" && supabase status -o env 2>/dev/null | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY)=')"
+  export AGENTOS_AUTH=supabase SUPABASE_URL="$API_URL" SUPABASE_ANON_KEY="$ANON_KEY" SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY"
+fi
+AGENTOS_SCHEDULER_INTERVAL_MS=1000 AGENTOS_EGRESS_UPSTREAM_CA="$HOME_DIR/echo-ca.pem" PORT="$PORT" AGENTOS_WORKSPACE="$WORKSPACE" OPENROUTER_BASE_URL="http://localhost:$MOCK_PORT" OPENROUTER_API_KEY="mock" \
   node --import tsx src/index.ts > "$HOME_DIR/api.log" 2>&1 &
 API_PID=$!
 cd "$ROOT"
@@ -63,12 +80,24 @@ for _ in $(seq 1 60); do
 done
 curl -sf "http://localhost:$PORT/health" > /dev/null || { echo "API did not start:"; cat "$HOME_DIR/api.log"; exit 1; }
 
+# Supabase mode: sign up a user (creates their workspace) and make a DB-stored API key for the SDK.
+if [[ "$AUTH_MODE" == "supabase" ]]; then
+  JAR="$HOME_DIR/cookies.txt"
+  curl -sf -c "$JAR" -H 'content-type: application/json' "http://localhost:$PORT/v1/x/auth/signup" \
+    -d "{\"email\":\"${RUN_TAG}-owner@example.test\",\"password\":\"owner-pass-123\",\"workspace_name\":\"Conformance\"}" > /dev/null \
+    || { echo "Sign-up failed:"; tail -20 "$HOME_DIR/api.log"; exit 1; }
+  API_KEY="$(curl -sf -b "$JAR" -H 'content-type: application/json' "http://localhost:$PORT/v1/x/api_keys" -d '{"name":"conformance"}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).key))")"
+  [[ "$API_KEY" == aos-* ]] || { echo "Could not create a DB API key"; exit 1; }
+  export AGENTOS_TEST_RUN_TAG="$RUN_TAG"
+fi
+
 # 3. SDK tests.
 cd "$ROOT/tests/conformance"
 set +e
 AGENTOS_BASE_URL="http://localhost:$PORT" AGENTOS_API_KEY="$API_KEY" AGENTOS_MCP_URL="http://localhost:$MCP_PORT/mcp" npx vitest run "$@"
 STATUS=$?
 set -e
-docker exec supabase_db_agentos psql -U postgres -tAc "select id from agentos.sessions where workspace_id = '$WORKSPACE'" > "$HOME_DIR/sessions.txt" 2>/dev/null || true
+docker exec supabase_db_agentos psql -U postgres -tAc "select id from agentos.sessions where workspace_id = '$WORKSPACE' or workspace_id in (select m.workspace_id from agentos.workspace_members m join auth.users u on u.id = m.user_id where u.email like '${RUN_TAG}-%')" > "$HOME_DIR/sessions.txt" 2>/dev/null || true
 [[ $STATUS -ne 0 ]] && { echo "--- api log (tail)"; tail -30 "$HOME_DIR/api.log"; }
 exit $STATUS

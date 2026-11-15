@@ -52,7 +52,8 @@ The deploy step (`agentos cloud deploy`) will:
 
 1. apply `supabase/migrations` to the Supabase project,
 2. create a Railway project with three services (`api`, `console`, `egress`) from `deploy/railway/*.json`,
-3. set their variables (`DATABASE_URL`, `E2B_API_KEY`, egress admin secret and CA, `API_URL`, …),
+3. set their variables (`DATABASE_URL`, `E2B_API_KEY`, `AGENTOS_AUTH=supabase` with `SUPABASE_URL` /
+   `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY`, egress admin secret and CA, `API_URL`, …),
 4. give the Console a public domain and the egress proxy a public TCP proxy (`AGENTOS_EGRESS_PUBLIC_ADDR`).
 
 Images can be built and checked locally first:
@@ -61,6 +62,19 @@ Images can be built and checked locally first:
 docker build -f deploy/api.Dockerfile -t agentos-api .
 docker build -f deploy/console.Dockerfile -t agentos-console .
 docker build -f deploy/egress.Dockerfile -t agentos-egress .
+```
+
+## Sign-in and workspaces (built; tested against local Supabase Auth)
+
+Hosted AgentOS uses Supabase Auth (`AGENTOS_AUTH=supabase`): people sign up with email, each gets a
+workspace, and admins add teammates as admin, developer (build and run agents) or viewer (read-only).
+API keys belong to a workspace and are stored hashed in the database. SDK users pick a workspace with
+the `anthropic-workspace-id` header, as with Anthropic Managed Agents.
+
+Try it locally (no cloud account needed):
+
+```bash
+AGENTOS_TEST_AUTH=supabase pnpm test:conformance
 ```
 
 ## How networking works in the cloud

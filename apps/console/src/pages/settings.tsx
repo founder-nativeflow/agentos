@@ -12,6 +12,8 @@ import { api, ApiRequestError, timeAgo } from "@/lib/api";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useMe } from "@/lib/auth";
 
 export function SettingsPage() {
   return (
@@ -20,6 +22,7 @@ export function SettingsPage() {
       <div className="grid gap-6 lg:max-w-3xl">
         <ProviderCard />
         <ApiKeysCard />
+        <MembersCard />
       </div>
     </>
   );
@@ -234,5 +237,87 @@ function CreateKeyDialog() {
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+type Member = { user_id: string; email: string; role: "admin" | "developer" | "viewer"; created_at: string };
+
+/** Supabase mode: workspace members and roles (admins can change them). */
+function MembersCard() {
+  const me = useMe();
+  const qc = useQueryClient();
+  const isCloud = me.data?.mode === "supabase";
+  const isAdmin = me.data?.workspace?.role === "admin";
+  const members = useQuery({
+    queryKey: ["members", me.data?.workspace?.id],
+    queryFn: () => api<{ data: Member[] }>("/v1/x/workspace/members"),
+    enabled: isCloud,
+  });
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<Member["role"]>("developer");
+  const refresh = () => qc.invalidateQueries({ queryKey: ["members"] });
+  const fail = (e: unknown) => toast.error(e instanceof ApiRequestError ? e.message : "Something went wrong.");
+
+  if (!isCloud) return null;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Members</CardTitle>
+        <CardDescription>
+          Who can use {me.data?.workspace?.name}. Admins manage members and keys; developers build and run agents; viewers can only look.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-3">
+        {members.data?.data.map((m) => (
+          <div key={m.user_id} className="flex items-center gap-2 text-sm">
+            <span className="truncate">{m.email}</span>
+            {m.user_id === me.data?.actor.id && <Badge variant="outline">you</Badge>}
+            <div className="ml-auto flex items-center gap-2">
+              {isAdmin ? (
+                <Select value={m.role} onValueChange={(r) => api(`/v1/x/workspace/members/${m.user_id}`, { method: "POST", json: { role: r } }).then(refresh, fail)}>
+                  <SelectTrigger className="h-8 w-32"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="admin">Admin</SelectItem>
+                    <SelectItem value="developer">Developer</SelectItem>
+                    <SelectItem value="viewer">Viewer</SelectItem>
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Badge variant="secondary" className="capitalize">{m.role}</Badge>
+              )}
+              {isAdmin && m.user_id !== me.data?.actor.id && (
+                <Button size="icon" variant="ghost" aria-label={`Remove ${m.email}`}
+                  onClick={() => window.confirm(`Remove ${m.email} from this workspace?`) && api(`/v1/x/workspace/members/${m.user_id}`, { method: "DELETE" }).then(refresh, fail)}>
+                  <Trash2 className="size-4" />
+                </Button>
+              )}
+            </div>
+          </div>
+        ))}
+        {isAdmin && (
+          <form
+            className="flex gap-2 border-t pt-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!email.trim()) return;
+              api("/v1/x/workspace/members", { method: "POST", json: { email: email.trim(), role } })
+                .then(() => { setEmail(""); refresh(); toast.success("Member added"); }, fail);
+            }}
+          >
+            <Input placeholder="teammate@company.com" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+            <Select value={role} onValueChange={(r) => setRole(r as Member["role"])}>
+              <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="admin">Admin</SelectItem>
+                <SelectItem value="developer">Developer</SelectItem>
+                <SelectItem value="viewer">Viewer</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button type="submit">Add</Button>
+          </form>
+        )}
+        {isAdmin && <p className="text-xs text-muted-foreground">They need an AgentOS account first (they can sign up on the login page).</p>}
+      </CardContent>
+    </Card>
   );
 }

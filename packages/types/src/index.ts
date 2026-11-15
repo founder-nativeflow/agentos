@@ -32,6 +32,7 @@ export const ID_PREFIX = {
   apiKey: "aok_", // AgentOS extension
   worker: "wrk_", // AgentOS extension
   thread: "sthr_",
+  workspace: "wrkspc_",
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;
@@ -156,6 +157,60 @@ export interface Multiagent {
   workflows?: MultiagentMember;
   subagents?: MultiagentMember;
   advisor?: { type: "enabled"; model: string } | { type: "disabled" };
+}
+
+/* ------------------------------------------------------------ Deployments */
+
+export interface CronSchedule {
+  type: "cron";
+  expression: string;
+  timezone: string;
+  last_run_at?: string | null;
+  upcoming_runs_at?: string[];
+}
+
+export type DeploymentPausedReason =
+  | { type: "manual" }
+  | { type: "error"; error: { type: string; message?: string } };
+
+/** CMA `BetaManagedAgentsDeployment`: an agent version bound to everything it needs to run autonomously. */
+export interface Deployment {
+  type: "deployment";
+  id: string;
+  name: string;
+  description: string | null;
+  agent: { type: "agent"; id: string; version: number };
+  environment_id: string;
+  vault_ids: string[];
+  resources: Array<{ type: "file"; file_id: string; mount_path?: string | null }>;
+  initial_events: Array<{ type: "user.message" | "system.message"; content: TextBlock[] }>;
+  budget: Budget | null;
+  schedule: CronSchedule | null;
+  status: "active" | "paused";
+  paused_reason: DeploymentPausedReason | null;
+  metadata: Metadata;
+  /** AgentOS extension: whether a webhook token is set (POST /v1/x/hooks/deployments/{id}). */
+  x_webhook: { enabled: boolean };
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+}
+
+export type DeploymentTrigger =
+  | { type: "manual" }
+  | { type: "schedule"; scheduled_at: string }
+  | { type: "webhook" }; // AgentOS extension
+
+/** CMA `BetaManagedAgentsDeploymentRun`: append-only record of one execution (session created or error). */
+export interface DeploymentRun {
+  type: "deployment_run";
+  id: string;
+  deployment_id: string;
+  agent: { type: "agent"; id: string; version: number };
+  trigger_context: DeploymentTrigger;
+  session_id: string | null;
+  error: { type: string; message: string } | null;
+  created_at: string;
 }
 
 /* ------------------------------------------------------- Session threads */

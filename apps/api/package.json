@@ -14,6 +14,7 @@
     "@hono/node-server": "^1.13.7",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@truefoundry/trueforge-core": "0.182.0",
+    "cron-parser": "5.10.3",
     "e2b": "2.61.0",
     "esbuild": "0.28.2",
     "hono": "^4.6.14",

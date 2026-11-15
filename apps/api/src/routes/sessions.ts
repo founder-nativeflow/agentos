@@ -11,6 +11,7 @@ import { paginate } from "../lib/pagination.js";
 import { bus } from "../runtime/bus.js";
 import { destroySandbox, SANDBOX_PROVIDER } from "../runtime/sandbox.js";
 import { closeMcp } from "../runtime/mcp.js";
+import { createSession } from "../runtime/session-service.js";
 import { egress } from "../egress/manager.js";
 import { SESSIONS_DIR } from "../lib/paths.js";
 import type { SessionRuntime } from "../runtime/runner.js";
@@ -85,63 +86,14 @@ export function sessionRoutes(runtime: SessionRuntime) {
   });
 
   r.post("/", async (c) => {
-    const store = c.get("store");
     const body = createBody.parse(await c.req.json());
-    const vaultIds = [...new Set(body.vault_ids ?? [])];
-    for (const vid of vaultIds) {
-      const v = await store.vaults.get(vid);
-      if (!v) throw notFound("Vault", vid);
-      if (v.archived_at) throw conflict(`Vault ${vid} is archived`);
+    if (body.initial_events?.some((e) => e.type !== "user.message" && e.type !== "user.define_outcome")) {
+      throw badRequest("initial_events accepts only user.message and user.define_outcome");
     }
-
-    const ref = typeof body.agent === "string" ? { id: body.agent } : body.agent;
-    const agent = "version" in ref && ref.version ? await store.agents.getVersion(ref.id, ref.version) : await store.agents.get(ref.id);
-    if (!agent) throw notFound("Agent", ref.id);
-    if (agent.archived_at) throw conflict("Archived agents can't start new sessions");
-    const env = await store.environments.get(body.environment_id);
-    if (!env) throw notFound("Environment", body.environment_id);
-    if (env.archived_at) throw conflict("Archived environments can't start new sessions");
-
-    const now = nowIso();
-    const resources: SessionResource[] = [];
-    for (const res of body.resources ?? []) {
-      const file = await store.files.get(res.file_id);
-      if (!file) throw notFound("File", res.file_id);
-      if (!file.downloadable) throw badRequest(`File ${file.id} has expired`);
-      const mount = res.mount_path ?? `/mnt/session/uploads/${file.id}`;
-      if (!mount.startsWith("/") || mount.split("/").includes("..") || mount.startsWith("/mnt/session/outputs")) {
-        throw badRequest(`Invalid mount_path: ${mount}`);
-      }
-      if (resources.some((r) => r.mount_path === mount)) throw badRequest(`Two files share mount_path ${mount}`);
-      resources.push({ id: newId("resource"), type: "file", file_id: file.id, mount_path: mount, created_at: now, updated_at: now });
-    }
-    const session: Session = {
-      type: "session",
-      id: newId("session"),
-      title: body.title ?? null,
-      status: "idle",
-      agent,
-      environment_id: env.id,
-      vault_ids: vaultIds,
-      budget: body.budget ?? null,
-      usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cost_usd: "0", active_seconds: 0 },
-      stats: { active_seconds: 0, duration_seconds: 0 },
-      resources,
-      outcome_evaluations: [],
-      metadata: body.metadata ?? {},
-      deployment_id: null,
-      runs_on: SANDBOX_PROVIDER === "e2b" ? "cloud" : "local",
-      stop_reason: null,
-      created_at: now,
-      updated_at: now,
-      archived_at: null,
-    };
-    await store.sessions.insert(session);
-    if (body.initial_events?.length) {
-      const allowed = body.initial_events.every((e) => e.type === "user.message" || e.type === "user.define_outcome");
-      if (!allowed) throw badRequest("initial_events accepts only user.message and user.define_outcome");
-      await runtime.receive(session, body.initial_events as InboundEvent[]);
-    }
+    const session = await createSession(c.get("store"), runtime, {
+      ...body,
+      initial_events: body.initial_events as InboundEvent[] | undefined,
+    });
     return c.json(session);
   });
 

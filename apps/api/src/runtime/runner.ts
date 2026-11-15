@@ -1,6 +1,7 @@
 import type { Agent, Environment, InboundEvent, Session, SessionEvent, StopReason } from "@agentos/types";
 import { newId, nowIso } from "../lib/ids.js";
 import type { Store } from "../lib/store.js";
+import { storeScope } from "../lib/scope.js";
 import { bus } from "./bus.js";
 import { callModel, ModelError, type ChatMessage } from "./model.js";
 import { existsSync, readdirSync, statSync } from "node:fs";
@@ -42,7 +43,12 @@ export class SessionRuntime {
   private trueforge = RUNTIME === "trueforge" ? new TrueForgeEngine() : null;
   private again = new Set<string>();
 
-  constructor(private store: Store) {}
+  constructor(private base: Store) {}
+
+  /** The request's (or session's) workspace-scoped store; the default store in local mode. */
+  private get store(): Store {
+    return storeScope.getStore() ?? this.base;
+  }
 
   /* ------------------------------------------------------------ events */
 
@@ -102,11 +108,16 @@ export class SessionRuntime {
 
   /** Sessions left "running" by a previous process are settled as idle. */
   async recover(): Promise<void> {
-    for (const s of await this.store.sessions.listRunning()) {
-      await this.emit(s.id, { type: "session.error", error: { type: "unknown_error", message: "AgentOS restarted while this session was running" } });
-      await this.setIdle(s, { type: "end_turn" });
+    for (const r of await this.base.runningSessionsAllWorkspaces()) {
+      await storeScope.run(this.base.scoped(r.workspace_id), async () => {
+        const s = await this.store.sessions.get(r.id);
+        if (!s) return;
+        await this.emit(s.id, { type: "session.error", error: { type: "unknown_error", message: "AgentOS restarted while this session was running" } });
+        await this.setIdle(s, { type: "end_turn" });
+      });
     }
   }
+
 
   /* -------------------------------------------------------------- state */
 

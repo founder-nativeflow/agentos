@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import type { Agent, CredentialAuth, Environment, FileMetadata, Session, SessionEvent, SessionThread, Vault, VaultCredential } from "@agentos/types";
+import type { Agent, CredentialAuth, Deployment, DeploymentRun, Environment, FileMetadata, Session, SessionEvent, SessionThread, Vault, VaultCredential } from "@agentos/types";
 
 /**
  * Storage backed by Supabase Postgres (schema `agentos`).
@@ -11,6 +11,8 @@ export const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://postgres:p
 type Json = postgres.JSONValue;
 const asJson = (v: unknown) => v as Json;
 
+export type WorkspaceRole = "admin" | "developer" | "viewer";
+
 /** A file row: CMA metadata plus where the bytes live (relative to AGENTOS_HOME). */
 export type StoredFile = FileMetadata & { storage_path: string };
 
@@ -19,9 +21,26 @@ export class Store {
 
   constructor(
     readonly workspaceId = process.env.AGENTOS_WORKSPACE ?? "ws_default",
-    url = DATABASE_URL,
+    url: string | postgres.Sql = DATABASE_URL,
   ) {
-    this.sql = postgres(url, { max: 10, onnotice: () => {}, transform: { undefined: null } });
+    this.sql = typeof url === "string" ? postgres(url, { max: 10, onnotice: () => {}, transform: { undefined: null } }) : url;
+  }
+
+  /** The same database, scoped to another workspace (shares the connection pool). */
+  scoped(workspaceId: string): Store {
+    return workspaceId === this.workspaceId ? this : new Store(workspaceId, this.sql);
+  }
+
+  /** Workspace that owns a session (unscoped lookup, for the runtime). */
+  async workspaceOfSession(sessionId: string): Promise<string | null> {
+    const rows = await this.sql`select workspace_id from agentos.sessions where id = ${sessionId}`;
+    return (rows[0]?.workspace_id as string | undefined) ?? null;
+  }
+
+  /** Sessions left "running" in any workspace (crash/restart recovery). */
+  async runningSessionsAllWorkspaces(): Promise<Array<{ id: string; workspace_id: string }>> {
+    const rows = await this.sql`select id, workspace_id from agentos.sessions where status = 'running'`;
+    return rows.map((r) => ({ id: r.id as string, workspace_id: r.workspace_id as string }));
   }
 
   async init(): Promise<void> {
@@ -165,6 +184,158 @@ export class Store {
     listRunning: async (): Promise<Session[]> => {
       const rows = await this.sql`select * from agentos.sessions where workspace_id = ${this.workspaceId} and status = 'running'`;
       return rows.map(toSession);
+    },
+  };
+
+  /* ------------------------------------------------- workspaces (unscoped) */
+
+  workspaces = {
+    membershipsOf: async (userId: string): Promise<Array<{ id: string; name: string; role: WorkspaceRole }>> => {
+      const rows = await this.sql`
+        select w.id, w.name, m.role from agentos.workspace_members m join agentos.workspaces w on w.id = m.workspace_id
+        where m.user_id = ${userId} order by w.created_at`;
+      return rows.map((r) => ({ id: r.id as string, name: r.name as string, role: r.role as WorkspaceRole }));
+    },
+    create: async (id: string, name: string, ownerUserId: string): Promise<void> => {
+      await this.sql.begin(async (tx) => {
+        await tx`insert into agentos.workspaces (id, name) values (${id}, ${name})`;
+        await tx`insert into agentos.workspace_members (workspace_id, user_id, role) values (${id}, ${ownerUserId}, 'admin')`;
+      });
+    },
+    members: async (workspaceId: string): Promise<Array<{ user_id: string; role: WorkspaceRole; created_at: string }>> => {
+      const rows = await this.sql`select user_id, role, created_at from agentos.workspace_members where workspace_id = ${workspaceId} order by created_at`;
+      return rows.map((r) => ({ user_id: r.user_id as string, role: r.role as WorkspaceRole, created_at: iso(r.created_at)! }));
+    },
+    emails: async (userIds: string[]): Promise<Map<string, string>> => {
+      if (!userIds.length) return new Map();
+      const rows = await this.sql`select id, email from auth.users where id = any(${userIds}::uuid[])`;
+      return new Map(rows.map((r) => [String(r.id), String(r.email ?? "")]));
+    },
+    setMember: async (workspaceId: string, userId: string, role: WorkspaceRole): Promise<void> => {
+      await this.sql`
+        insert into agentos.workspace_members (workspace_id, user_id, role) values (${workspaceId}, ${userId}, ${role})
+        on conflict (workspace_id, user_id) do update set role = excluded.role`;
+    },
+    removeMember: async (workspaceId: string, userId: string): Promise<void> => {
+      await this.sql`delete from agentos.workspace_members where workspace_id = ${workspaceId} and user_id = ${userId}`;
+    },
+  };
+
+  /** API keys stored in the database (Supabase Auth mode). Only hashes are stored. */
+  apiKeys = {
+    insert: async (k: { id: string; name: string; key_hash: string; hint: string; created_by: string | null }): Promise<void> => {
+      await this.sql`
+        insert into agentos.api_keys (id, workspace_id, name, key_hash, hint, created_by)
+        values (${k.id}, ${this.workspaceId}, ${k.name}, ${k.key_hash}, ${k.hint}, ${k.created_by})`;
+    },
+    list: async (): Promise<Array<{ id: string; name: string; hint: string; created_at: string; last_used_at: string | null }>> => {
+      const rows = await this.sql`
+        select id, name, hint, created_at, last_used_at from agentos.api_keys
+        where workspace_id = ${this.workspaceId} and revoked_at is null order by created_at`;
+      return rows.map((r) => ({ id: r.id as string, name: r.name as string, hint: r.hint as string, created_at: iso(r.created_at)!, last_used_at: iso(r.last_used_at) }));
+    },
+    revoke: async (id: string): Promise<boolean> => {
+      const rows = await this.sql`
+        update agentos.api_keys set revoked_at = now() where id = ${id} and workspace_id = ${this.workspaceId} and revoked_at is null returning id`;
+      return rows.length > 0;
+    },
+    /** Unscoped: the key decides the workspace. */
+    findByHash: async (hash: string): Promise<{ id: string; workspace_id: string; created_by: string | null } | null> => {
+      const rows = await this.sql`select id, workspace_id, created_by from agentos.api_keys where key_hash = ${hash} and revoked_at is null`;
+      if (!rows[0]) return null;
+      void this.sql`update agentos.api_keys set last_used_at = now() where id = ${rows[0].id}`.catch(() => {});
+      return { id: rows[0].id as string, workspace_id: rows[0].workspace_id as string, created_by: (rows[0].created_by as string | null) ?? null };
+    },
+  };
+
+  /* ----------------------------------------------------------- deployments */
+
+  deployments = {
+    insert: async (d: Deployment, webhookHash: string | null = null): Promise<void> => {
+      await this.sql`
+        insert into agentos.deployments (id, workspace_id, name, description, agent_id, agent_version, environment_id, initial_events,
+          schedule, session_config, runs_on, status, paused_reason, metadata, webhook_token_hash, created_at, updated_at, archived_at)
+        values (${d.id}, ${this.workspaceId}, ${d.name}, ${d.description}, ${d.agent.id}, ${d.agent.version}, ${d.environment_id},
+          ${this.sql.json(asJson(d.initial_events))}, ${d.schedule ? this.sql.json(asJson({ type: "cron", expression: d.schedule.expression, timezone: d.schedule.timezone })) : null},
+          ${this.sql.json(asJson({ vault_ids: d.vault_ids, resources: d.resources, budget: d.budget }))}, 'cloud', ${d.status},
+          ${d.paused_reason ? this.sql.json(asJson(d.paused_reason)) : null}, ${this.sql.json(asJson(d.metadata))}, ${webhookHash},
+          ${d.created_at}, ${d.updated_at}, ${d.archived_at})`;
+    },
+    update: async (d: Deployment): Promise<void> => {
+      await this.sql`
+        update agentos.deployments set name = ${d.name}, description = ${d.description}, agent_id = ${d.agent.id}, agent_version = ${d.agent.version},
+          environment_id = ${d.environment_id}, initial_events = ${this.sql.json(asJson(d.initial_events))},
+          schedule = ${d.schedule ? this.sql.json(asJson({ type: "cron", expression: d.schedule.expression, timezone: d.schedule.timezone })) : null},
+          session_config = ${this.sql.json(asJson({ vault_ids: d.vault_ids, resources: d.resources, budget: d.budget }))},
+          status = ${d.status}, paused_reason = ${d.paused_reason ? this.sql.json(asJson(d.paused_reason)) : null},
+          metadata = ${this.sql.json(asJson(d.metadata))}, updated_at = ${d.updated_at}, archived_at = ${d.archived_at}
+        where id = ${d.id} and workspace_id = ${this.workspaceId}`;
+    },
+    setWebhookHash: async (id: string, hash: string | null): Promise<void> => {
+      await this.sql`update agentos.deployments set webhook_token_hash = ${hash} where id = ${id} and workspace_id = ${this.workspaceId}`;
+    },
+    get: async (id: string): Promise<Deployment | null> => {
+      const rows = await this.sql`select * from agentos.deployments where id = ${id} and workspace_id = ${this.workspaceId}`;
+      return rows[0] ? toDeployment(rows[0]) : null;
+    },
+    list: async (f: { includeArchived: boolean; agentId?: string; status?: string }): Promise<Deployment[]> => {
+      const rows = await this.sql`
+        select * from agentos.deployments where workspace_id = ${this.workspaceId}
+        ${f.includeArchived ? this.sql`` : this.sql`and archived_at is null`}
+        ${f.agentId ? this.sql`and agent_id = ${f.agentId}` : this.sql``}
+        ${f.status ? this.sql`and status = ${f.status}` : this.sql``}
+        order by created_at desc limit 500`;
+      return rows.map(toDeployment);
+    },
+    /** Unscoped: active scheduled deployments in every workspace (for the scheduler). */
+    scheduledAllWorkspaces: async (): Promise<Array<{ deployment: Deployment; workspace_id: string }>> => {
+      const rows = await this.sql`
+        select * from agentos.deployments where schedule is not null and archived_at is null and status = 'active'`;
+      return rows.map((r) => ({ deployment: toDeployment(r), workspace_id: r.workspace_id as string }));
+    },
+    /** Unscoped: deployment + workspace + webhook hash, for the public webhook endpoint. */
+    forWebhook: async (id: string): Promise<{ workspace_id: string; hash: string | null } | null> => {
+      const rows = await this.sql`select workspace_id, webhook_token_hash from agentos.deployments where id = ${id}`;
+      return rows[0] ? { workspace_id: rows[0].workspace_id as string, hash: (rows[0].webhook_token_hash as string | null) ?? null } : null;
+    },
+    markScheduledRun: async (id: string, at: string): Promise<void> => {
+      await this.sql`update agentos.deployments set last_scheduled_run_at = ${at} where id = ${id}`;
+    },
+  };
+
+  deploymentRuns = {
+    /** Returns false if a run for this (deployment, scheduled_at) already exists. */
+    insert: async (r: DeploymentRun): Promise<boolean> => {
+      const scheduledAt = r.trigger_context.type === "schedule" ? r.trigger_context.scheduled_at : null;
+      const rows = await this.sql`
+        insert into agentos.deployment_runs (id, deployment_id, trigger, session_id, error, agent, scheduled_at, created_at)
+        values (${r.id}, ${r.deployment_id}, ${this.sql.json(asJson(r.trigger_context))}, ${r.session_id},
+          ${r.error ? this.sql.json(asJson(r.error)) : null}, ${this.sql.json(asJson(r.agent))}, ${scheduledAt}, ${r.created_at})
+        on conflict do nothing returning id`;
+      return rows.length > 0;
+    },
+    complete: async (id: string, sessionId: string | null, error: DeploymentRun["error"]): Promise<void> => {
+      await this.sql`update agentos.deployment_runs set session_id = ${sessionId}, error = ${error ? this.sql.json(asJson(error)) : null} where id = ${id}`;
+    },
+    get: async (id: string): Promise<DeploymentRun | null> => {
+      const rows = await this.sql`
+        select r.* from agentos.deployment_runs r join agentos.deployments d on d.id = r.deployment_id
+        where r.id = ${id} and d.workspace_id = ${this.workspaceId}`;
+      return rows[0] ? toDeploymentRun(rows[0]) : null;
+    },
+    list: async (f: { deploymentId?: string; hasError?: boolean; triggerType?: string; createdGte?: string; createdLte?: string; createdGt?: string; createdLt?: string }): Promise<DeploymentRun[]> => {
+      const rows = await this.sql`
+        select r.* from agentos.deployment_runs r join agentos.deployments d on d.id = r.deployment_id
+        where d.workspace_id = ${this.workspaceId}
+        ${f.deploymentId ? this.sql`and r.deployment_id = ${f.deploymentId}` : this.sql``}
+        ${f.hasError === true ? this.sql`and r.error is not null` : f.hasError === false ? this.sql`and r.error is null` : this.sql``}
+        ${f.triggerType ? this.sql`and r.trigger->>'type' = ${f.triggerType}` : this.sql``}
+        ${f.createdGte ? this.sql`and r.created_at >= ${f.createdGte}` : this.sql``}
+        ${f.createdLte ? this.sql`and r.created_at <= ${f.createdLte}` : this.sql``}
+        ${f.createdGt ? this.sql`and r.created_at > ${f.createdGt}` : this.sql``}
+        ${f.createdLt ? this.sql`and r.created_at < ${f.createdLt}` : this.sql``}
+        order by r.created_at desc limit 1000`;
+      return rows.map(toDeploymentRun);
     },
   };
 
@@ -472,5 +643,42 @@ function toThread(r: postgres.Row): SessionThread {
     created_at: iso(r.created_at)!,
     updated_at: iso(r.updated_at)!,
     archived_at: iso(r.archived_at),
+  };
+}
+
+function toDeployment(r: postgres.Row): Deployment {
+  const cfg = (r.session_config ?? {}) as { vault_ids?: string[]; resources?: Deployment["resources"]; budget?: Deployment["budget"] };
+  return {
+    type: "deployment",
+    id: r.id,
+    name: r.name,
+    description: r.description ?? null,
+    agent: { type: "agent", id: r.agent_id, version: r.agent_version },
+    environment_id: r.environment_id,
+    vault_ids: cfg.vault_ids ?? [],
+    resources: cfg.resources ?? [],
+    initial_events: r.initial_events ?? [],
+    budget: cfg.budget ?? null,
+    schedule: r.schedule ? { ...r.schedule, last_run_at: iso(r.last_scheduled_run_at) } : null,
+    status: r.status === "paused" ? "paused" : "active",
+    paused_reason: r.paused_reason ?? null,
+    metadata: r.metadata ?? {},
+    x_webhook: { enabled: Boolean(r.webhook_token_hash) },
+    created_at: iso(r.created_at)!,
+    updated_at: iso(r.updated_at)!,
+    archived_at: iso(r.archived_at),
+  };
+}
+
+function toDeploymentRun(r: postgres.Row): DeploymentRun {
+  return {
+    type: "deployment_run",
+    id: r.id,
+    deployment_id: r.deployment_id,
+    agent: r.agent,
+    trigger_context: r.trigger,
+    session_id: r.session_id ?? null,
+    error: r.error ?? null,
+    created_at: iso(r.created_at)!,
   };
 }

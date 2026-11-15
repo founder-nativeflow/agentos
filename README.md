@@ -14,6 +14,7 @@ Managed agents you can run **on your own machine** or **in the cloud**, powered 
 | `/v1/sessions` (create with `initial_events`, list, get, update title/metadata/budget, archive, delete) | ✅ CMA-compatible |
 | Session events: send (`user.message`, `user.tool_confirmation`, `user.custom_tool_result`, `user.interrupt`), list, SSE stream with replay | ✅ |
 | Agent loop runs on [`@truefoundry/trueforge-core`](https://github.com/truefoundry/trueforge) (MIT, pinned) behind an adapter: state saved per session (survives restarts), context compaction (`agent.thread_context_compacted`), exact OpenRouter cost via a loopback proxy. `AGENTOS_RUNTIME=classic` selects the original loop | ✅ |
+| Deployments (`/v1/deployments`, `/v1/deployment_runs`, CMA-compatible): a deployment pins an **agent version** with its environment, vaults, files, budget and task; triggers: run now, 5-field cron with time zone (exactly once per occurrence, safe with several API replicas), and a webhook with a secret token (AgentOS extension). Run history links each run to its session and cost; a broken reference (archived environment, missing vault…) pauses the deployment with the error. Console: Deployments page with schedule presets, version switcher, webhook setup and run history | ✅ |
 | Sub-agents: CMA `multiagent_20261001` inline sub-agents run as session threads (`/v1/sessions/{id}/threads`, thread events, approvals inside sub-agents, per-thread usage); Console shows delegations, a Threads tab and each thread's transcript. Predefined agents, advisor and workflows: not yet (400) | ✅ |
 | Agent loop features: OpenRouter model calls with fallbacks and an output cap (`model.max_tokens`, default 8192), built-in tools (bash, read, write, edit, glob, grep, web_fetch), custom tools, permission policies (allow / ask / deny), budgets (`budget_reached`), interrupts, crash recovery | ✅ |
 | `/v1/files` (upload, list incl. `scope_id`/`ids`, metadata, download, delete); files attached to sessions via `resources`; session outputs listed as session-scoped files | ✅ CMA-compatible |
@@ -21,12 +22,13 @@ Managed agents you can run **on your own machine** or **in the cloud**, powered 
 | MCP servers on agents (`mcp_servers` + `mcp_toolset`, Streamable HTTP): tools listed per session, bearer token from the session's vaults, `agent.mcp_tool_use` / `agent.mcp_tool_result` events, approvals (default `always_ask`) | ✅ |
 | Egress proxy: `limited` environments reach only their `allowed_hosts` (+ package registries if allowed), via an internal Docker network whose only exit is the proxy; `environment_variable` credentials appear in the sandbox as placeholders and the proxy injects the real value (headers, optionally body) only for the credential's hosts, decrypting HTTPS with a per-install AgentOS CA | ✅ |
 | Docker sandbox per session (no network unless the environment allows it; packages installed on start; outputs in `/mnt/session/outputs`) | ✅ |
-| Local admin login (required) + API keys (create/revoke in Settings or the CLI) | ✅ (config file; moves to Supabase Auth with Phase 2) |
+| Local admin login (required) + API keys (create/revoke in Settings or the CLI) | ✅ local mode (config file) |
+| Cloud sign-in (`AGENTOS_AUTH=supabase`): Supabase Auth accounts with self-serve sign-up, workspaces (`wrkspc_…`) with admin / developer / viewer roles, members, workspace-bound API keys in the database, `anthropic-workspace-id` header like CMA; every request runs on a workspace-scoped store | ✅ |
 | Console: login, Overview, Agents, agent detail (with its sessions), Models, Environments, Sessions (attach files), live session view (transcript, approvals, composer, interrupt, budget, cost, events, tools, outputs), Files, Credential vaults, Settings (OpenRouter key, API keys); MCP servers in Create agent; vault picker in Create session | ✅ |
 | Supabase schema (all resources, RLS) | ✅ applied to local Supabase |
 | `web_search` tool | ⏳ Not available yet |
 | Cloud deploy (Railway, Supabase cloud), cloud sandboxes (E2B), Supabase Auth + workspaces, laptop workers, local/cloud switch (`push`/`pull`) | ⏳ Phase 2 (needs cloud accounts) |
-| `mcp_oauth` credentials, memory, deployments, skills | ⏳ Phase 3; unbuilt resources | ⏳ Answer `404 not_found_error` "not implemented yet (planned: Phase N)" |
+| `mcp_oauth` credentials, memory, skills | ⏳ Phase 3; unbuilt resources | ⏳ Answer `404 not_found_error` "not implemented yet (planned: Phase N)" |
 
 ## Requirements
 Node 20+, pnpm 9 (`corepack prepare pnpm@9.15.4 --activate`), Docker (for local Supabase and session sandboxes), the Supabase CLI.
@@ -80,13 +82,18 @@ tests/conformance   Official Anthropic SDK run against AgentOS
 pnpm typecheck
 bash tests/conformance/runtime-scenarios.sh   # restart keeps context, budget resume, sub-agent approval across a restart, compaction
 AGENTOS_RUNTIME=classic pnpm test:conformance # the same SDK suite on the original loop
-pnpm test:conformance    # throwaway API on :4100 + a scripted mock model on :4199; a test MCP server on :4198 and an HTTP/HTTPS echo server on :4197/:4196; runs the SDK tests (31)
+AGENTOS_TEST_AUTH=supabase pnpm test:conformance  # the whole suite in Supabase Auth mode (users, workspaces, DB keys)
+pnpm test:conformance    # throwaway API on :4100 + a scripted mock model on :4199; a test MCP server on :4198 and an HTTP/HTTPS echo server on :4197/:4196; runs the SDK tests (40)
 ```
 
 ## Configuration (runtime)
 | Variable | Default | Meaning |
 |---|---|---|
 | `AGENTOS_RUNTIME` | `trueforge` | `classic` = AgentOS's original loop (fallback) |
+| `AGENTOS_AUTH` | `local` | `supabase` = Supabase Auth users and workspaces (needs `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`) |
+| `AGENTOS_SIGNUP` | on | `off` disables self-serve sign-up in Supabase mode |
+| `AGENTOS_SCHEDULER` | on | `off` stops this API process from firing cron deployments |
+| `AGENTOS_SCHEDULER_INTERVAL_MS` | `15000` | How often the scheduler checks for due runs |
 | `AGENTOS_COMPACTION` | on | `off` disables context compaction |
 | `AGENTOS_COMPACTION_THRESHOLD_TOKENS` | from the model's context length | Compact when the context exceeds this |
 | `AGENTOS_MAX_OUTPUT_TOKENS` | `8192` | Default output cap per model call |
