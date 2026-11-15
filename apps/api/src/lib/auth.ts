@@ -1,4 +1,5 @@
 import type { Context, MiddlewareHandler } from "hono";
+import { authThrottle, limitRequests } from "./limits.js";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { loadConfig, sha256, verifySession } from "./config.js";
 import { ApiError, unauthorized } from "./errors.js";
@@ -22,11 +23,21 @@ export interface Actor {
   email?: string;
 }
 
-const secure = () => process.env.NODE_ENV === "production";
+/**
+ * Cookie flags: always HttpOnly + SameSite=Lax; Secure when served over HTTPS (directly, or
+ * behind a proxy with AGENTOS_TRUST_PROXY=1), in production, or with AGENTOS_SECURE_COOKIES=1.
+ */
+export function cookieOpts(c: Context, maxAge?: number) {
+  const https =
+    new URL(c.req.url).protocol === "https:" ||
+    (process.env.AGENTOS_TRUST_PROXY === "1" && c.req.header("x-forwarded-proto") === "https");
+  const secure = https || process.env.NODE_ENV === "production" || process.env.AGENTOS_SECURE_COOKIES === "1";
+  return { httpOnly: true, sameSite: "Lax" as const, path: "/", secure, ...(maxAge ? { maxAge } : {}) };
+}
 
 export function setAuthCookies(c: Context, t: AuthTokens): void {
-  setCookie(c, ACCESS_COOKIE, t.access_token, { httpOnly: true, sameSite: "Lax", path: "/", secure: secure(), maxAge: t.expires_in });
-  setCookie(c, REFRESH_COOKIE, t.refresh_token, { httpOnly: true, sameSite: "Lax", path: "/", secure: secure(), maxAge: 60 * 60 * 24 * 30 });
+  setCookie(c, ACCESS_COOKIE, t.access_token, cookieOpts(c, t.expires_in));
+  setCookie(c, REFRESH_COOKIE, t.refresh_token, cookieOpts(c, 60 * 60 * 24 * 30));
 }
 
 export function clearAuthCookies(c: Context): void {
@@ -47,6 +58,7 @@ const READ_ONLY = new Set(["GET", "HEAD", "OPTIONS"]);
  */
 export const requireAuth: MiddlewareHandler = async (c, next) => {
   const base = c.get("store");
+  authThrottle.check(c);
   if (AUTH_MODE === "local") {
     const cfg = loadConfig();
     if (!cfg) throw new ApiError(403, "permission_error", "AgentOS is not initialised. Run `pnpm agentos init` first.");
@@ -59,7 +71,11 @@ export const requireAuth: MiddlewareHandler = async (c, next) => {
       const hit = key ? cfg.api_keys.find((k) => k.key_hash === sha256(key)) : undefined;
       if (hit) actor = { type: "api_key", id: hit.id, role: "admin", workspace_id: base.workspaceId };
     }
-    if (!actor) throw unauthorized();
+    if (!actor) {
+      authThrottle.failed(c);
+      throw unauthorized();
+    }
+    limitRequests(`${actor.type}:${actor.id}`);
     c.set("actor", actor);
     return storeScope.run(base, () => next());
   }
@@ -95,7 +111,10 @@ export const requireAuth: MiddlewareHandler = async (c, next) => {
       user = await userFromToken(key); // a Supabase access token used directly
     }
   }
-  if (!user && !keyId) throw unauthorized();
+  if (!user && !keyId) {
+    authThrottle.failed(c);
+    throw unauthorized();
+  }
 
   const requested = c.req.header(WORKSPACE_HEADER) ?? getCookie(c, WORKSPACE_COOKIE) ?? null;
   let actor: Actor;
@@ -121,6 +140,7 @@ export const requireAuth: MiddlewareHandler = async (c, next) => {
   if (actor.role === "viewer" && !READ_ONLY.has(c.req.method) && !path.startsWith("/v1/x/auth/") && !path.startsWith("/v1/x/workspaces")) {
     throw new ApiError(403, "permission_error", "Viewers have read-only access to this workspace");
   }
+  limitRequests(`${actor.type}:${actor.id}`);
   c.set("actor", actor);
   const scoped = actor.workspace_id ? base.scoped(actor.workspace_id) : base;
   c.set("store", scoped);

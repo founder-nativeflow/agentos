@@ -94,6 +94,7 @@ export class E2BSandbox implements Sandbox {
 
   async exec(command: string, opts: { stdin?: string; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ExecResult> {
     const sb = await this.ensure();
+    if (opts.signal?.aborted) return { stdout: "", stderr: "Interrupted", exitCode: 130, timedOut: false };
     void sb.setTimeout(SANDBOX_TIMEOUT_MS).catch(() => {});
     let cmd = command;
     let stdinFile: string | null = null;
@@ -119,6 +120,7 @@ export class E2BSandbox implements Sandbox {
       kill();
     }, timeoutMs);
     opts.signal?.addEventListener("abort", kill, { once: true });
+    if (opts.signal?.aborted) kill();
     try {
       const res = await handle.wait();
       return { stdout: trunc(res.stdout || stdout), stderr: trunc(res.stderr || stderr), exitCode: res.exitCode, timedOut };

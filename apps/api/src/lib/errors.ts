@@ -27,6 +27,8 @@ export function errorBody(c: Context, type: ErrorType, message: string): ErrorRe
 
 export function handleError(err: Error, c: Context) {
   if (err instanceof ApiError) {
+    const retry = (err as ApiError & { retryAfterSeconds?: number }).retryAfterSeconds;
+    if (retry) c.header("retry-after", String(retry));
     return c.json(errorBody(c, err.errorType, err.message), err.status);
   }
   if (err instanceof ZodError) {

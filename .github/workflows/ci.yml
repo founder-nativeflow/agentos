@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+
+  conformance:
+    # The official Anthropic SDK against AgentOS, with local Supabase, Docker sandboxes and a mock model.
+    runs-on: ubuntu-latest
+    needs: typecheck
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        auth: [local, supabase]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - run: pnpm install --frozen-lockfile
+      - name: Start local Supabase
+        run: supabase start -x studio,imgproxy,inbucket,edge-runtime,logflare,vector,supavisor
+      - name: Pull sandbox images
+        run: docker pull python:3.12-slim && docker pull node:22-alpine
+      - name: Conformance suite (${{ matrix.auth }})
+        run: AGENTOS_TEST_AUTH=${{ matrix.auth }} pnpm test:conformance
+
+  scenarios:
+    runs-on: ubuntu-latest
+    needs: typecheck
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - run: pnpm install --frozen-lockfile
+      - run: supabase start -x studio,imgproxy,inbucket,edge-runtime,logflare,vector,supavisor
+      - run: docker pull python:3.12-slim && docker pull node:22-alpine
+      - name: Local admin and test credentials (throwaway, CI only)
+        run: |
+          PASS="ci-$(openssl rand -hex 12)"
+          KEY="$(echo "$PASS" | pnpm -s agentos init --username admin --password-stdin --force | awk '/Your API key/{getline; gsub(/^ +| +$/, ""); print; exit}')"
+          printf 'AGENTOS_ADMIN_USERNAME=admin\nAGENTOS_ADMIN_PASSWORD=%s\nAGENTOS_API_KEY=%s\n' "$PASS" "$KEY" > .agentos/dev-credentials
+      - run: bash tests/conformance/runtime-scenarios.sh
+      - run: bash tests/conformance/security-scenario.sh
+      - run: bash tests/conformance/push-scenario.sh
+      - run: bash tests/conformance/backup-scenario.sh

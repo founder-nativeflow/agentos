@@ -1,4 +1,5 @@
 import type { Agent, AgentToolset, BuiltinToolName, CustomTool, PermissionPolicy } from "@agentos/types";
+import { guardedFetch } from "../lib/net-guard.js";
 import type { Sandbox } from "./sandbox.js";
 
 /** OpenAI-style function definition (what OpenRouter expects). */
@@ -211,10 +212,11 @@ export async function runBuiltin(
         return { text: "Invalid URL", isError: true };
       }
       const allowed = opts.allowedHosts;
-      if (allowed && !allowed.some((h) => (h.startsWith("*.") ? host.endsWith(h.slice(1)) : host === h))) {
+      const allowHost = (h: string) => !allowed || allowed.some((a) => (a.startsWith("*.") ? h.endsWith(a.slice(1)) : h === a));
+      if (!allowHost(host)) {
         return { text: `Blocked by environment networking: ${host} is not in allowed hosts`, isError: true };
       }
-      const res = await fetch(url, { signal, headers: { "User-Agent": "AgentOS web_fetch" } }).catch((e: Error) => e);
+      const res = await guardedFetch(url, { signal, headers: { "User-Agent": "AgentOS web_fetch" } }, allowHost).catch((e: Error) => e);
       if (res instanceof Error) return { text: `Fetch failed: ${res.message}`, isError: true };
       const raw = await res.text();
       const text = raw.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();

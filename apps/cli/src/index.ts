@@ -11,6 +11,9 @@
  *   agentos cloud init | check         cloud credentials (see cloud.ts, docs/cloud-setup.md)
  *   agentos remote add|list|remove     other AgentOS installs to push to (see push.ts)
  *   agentos push <agent> --to <remote> copy an agent version (+ environment, deployment) there
+ *   agentos pull <agent> --from <remote> the reverse: copy a remote agent version here
+ *   agentos backup [--include-secrets] dump the database, files and config (see backup.ts)
+ *   agentos restore <dir> --yes        replace all data with a backup
  */
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -27,7 +30,8 @@ import {
 } from "../../api/src/lib/config.ts";
 import { runCommand } from "./run.ts";
 import { cloudCommand } from "./cloud.ts";
-import { pushCommand, remoteCommand } from "./push.ts";
+import { pullCommand, pushCommand, remoteCommand } from "./push.ts";
+import { backupCommand, restoreCommand } from "./backup.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -171,13 +175,16 @@ const commands: Record<string, () => unknown> = {
   cloud: () => cloudCommand(sub),
   remote: () => remoteCommand(sub, arg, process.argv[5]),
   push: () => pushCommand(),
+  pull: () => pullCommand(),
+  backup: () => backupCommand(),
+  restore: () => restoreCommand(sub),
   admin: () => (sub === "reset-password" ? resetPassword() : console.log("Usage: agentos admin reset-password")),
   keys: () => (sub === "create" ? createKey(arg) : console.log("Usage: agentos keys create <name>")),
 };
 
 const fn = cmd ? commands[cmd] : undefined;
 if (!fn) {
-  console.log('Usage: agentos <init | dev | status | run <agent> "<message>" | cloud init|check | remote add|list|remove | push <agent> --to <remote> | admin reset-password | keys create <name>>');
+  console.log('Usage: agentos <init | dev | status | run <agent> "<message>" | cloud init|check | remote add|list|remove | push <agent> --to <remote> | pull <agent> --from <remote> | backup [--include-secrets] | restore <dir> --yes | admin reset-password | keys create <name>>');
   process.exit(cmd ? 1 : 0);
 }
 Promise.resolve(fn()).catch((err: Error) => {

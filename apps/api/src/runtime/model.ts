@@ -66,6 +66,7 @@ export async function callModel(
   messages: ChatMessage[],
   tools: ToolDef[],
   signal?: AbortSignal,
+  key?: string,
 ): Promise<ModelResult> {
   const effort = typeof model.effort === "string" ? model.effort : model.effort?.type;
   const body: Record<string, unknown> = {
@@ -85,7 +86,7 @@ export async function callModel(
       method: "POST",
       signal,
       headers: {
-        Authorization: `Bearer ${apiKey()}`,
+        Authorization: `Bearer ${key ?? apiKey()}`,
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/agentos",
         "X-Title": "AgentOS",

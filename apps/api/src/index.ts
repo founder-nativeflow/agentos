@@ -2,6 +2,8 @@ import "./lib/context.js";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { secureHeaders } from "hono/secure-headers";
+import { bodyLimit } from "hono/body-limit";
 import { API_VERSION, CMA_BETA } from "@agentos/types";
 import { newId } from "./lib/ids.js";
 import { errorBody, handleError } from "./lib/errors.js";
@@ -34,7 +36,35 @@ app.use("*", async (c, next) => {
   c.header("request-id", requestId);
 });
 
-app.use("/v1/*", cors({ origin: (o) => o, credentials: true }));
+/*
+ * CORS: SDKs and scripts don't need it, and the Console is served from the API's own origin
+ * (or proxied by Vite in development). Browsers on other origins get CORS only when listed in
+ * AGENTOS_CORS_ORIGINS (comma-separated); local mode also allows the Vite dev server.
+ */
+const corsOrigins = new Set(
+  [
+    ...(process.env.AGENTOS_CORS_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean),
+    ...(AUTH_MODE === "local" ? ["http://localhost:5173", "http://127.0.0.1:5173"] : []),
+  ],
+);
+app.use("/v1/*", cors({ origin: (o) => (corsOrigins.has(o) ? o : null), credentials: true }));
+app.use(
+  "*",
+  secureHeaders({
+    crossOriginResourcePolicy: false, // file downloads are fetched by the Console with credentials
+    crossOriginOpenerPolicy: false,
+    contentSecurityPolicy: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] },
+  }),
+);
+// JSON bodies are capped; file uploads have their own limit in /v1/files.
+const JSON_LIMIT = Number(process.env.AGENTOS_MAX_BODY_BYTES ?? 10 * 1024 * 1024);
+app.use("/v1/*", async (c, next) => {
+  if (c.req.path.startsWith("/v1/files")) return next();
+  return bodyLimit({
+    maxSize: JSON_LIMIT,
+    onError: (cc) => cc.json(errorBody(cc, "request_too_large", `Request bodies are limited to ${JSON_LIMIT} bytes`), 413),
+  })(c, next);
+});
 
 app.get("/health", async (c) => {
   let database = "ok";

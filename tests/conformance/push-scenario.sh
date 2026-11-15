@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `agentos push` end to end between two AgentOS instances ("local" :4610 → "cloud" :4611,
+# `agentos push` and `agentos pull` end to end between two AgentOS instances ("local" :4610 → "cloud" :4611,
 # separate workspaces in the local Supabase DB). Only the CLI and the public API are used.
 # Usage: bash tests/conformance/push-scenario.sh
 set -euo pipefail
@@ -101,4 +101,24 @@ check "deployment active" "$(api $DST /v1/deployments/$TD | jget .status)" "acti
 RUN=$(api $DST "/v1/deployments/$TD/run" -X POST)
 check "run created a session on the target" "$(echo "$RUN" | jget '.session_id.slice(0,7)+":"+(o.error===null)')" "sesn_01:true"
 
-[[ $FAIL -eq 0 ]] && echo "All push checks passed." || { echo "--- logs"; tail -15 "$HOME_DIR"/api-4611.log; exit 1; }
+echo "8. Pull: a change made on the cloud comes back to the original local agent"
+api $DST "/v1/agents/$TA" -d '{"version":2,"system":"Write reports. v3 (edited on cloud)"}' > /dev/null
+cli pull Reporter --from cloud --deployment $TD | sed 's/^/    /'
+check "local agent updated in place (no copy), now v3" "$(api $SRC /v1/agents | jget '.data.length+":"+o.data[0].id+":"+o.data[0].version+":"+o.data[0].system')" "1:$AGENT:3:Write reports. v3 (edited on cloud)"
+check "local agent keeps no tracking metadata of its own" "$(api $SRC /v1/agents/$AGENT | jget '.metadata["agentos.source"]===undefined')" "true"
+check "local deployment re-pinned to v3, still active" "$(api $SRC /v1/deployments/$DEPL | jget '.agent.version+":"+o.status')" "3:active"
+check "local environment kept its type" "$(api $SRC /v1/environments | jget '.data.length+":"+o.data[0].config.type')" "1:local"
+check "no file downloaded twice" "$(api $SRC /v1/files | jget '.data.length')" "1"
+OUT=$(cli push Reporter --to cloud --deployment $DEPL)
+check "pushing back only re-pins the cloud deployment to v3" "$(echo "$OUT" | grep -cE '^\s+[~+↑] ')/$(api $DST /v1/deployments/$TD | jget .agent.version)" "1/3"
+check "then everything is in sync" "$(cli push Reporter --to cloud --deployment $DEPL | grep -c 'Nothing to push')" "1"
+
+echo "9. Pull an agent that only exists on the cloud"
+api $DST /v1/agents -d '{"name":"Cloud helper","model":"mock/model","system":"from the cloud"}' > /dev/null
+cli pull "Cloud helper" --from cloud --dry-run | grep -q '+ agent' && echo "  ✓ dry run plans a new local agent" || { echo "  ✗ dry run"; FAIL=1; }
+check "dry run created nothing" "$(api $SRC /v1/agents | jget '.data.length')" "1"
+cli pull "Cloud helper" --from cloud > /dev/null
+check "created locally and linked to the cloud agent" "$(api $SRC /v1/agents | jget '.data.find(a=>a.name==="Cloud helper").metadata["agentos.source"].slice(0,8)')" "agent_01"
+check "pulling again changes nothing" "$(cli pull "Cloud helper" --from cloud | grep -c 'Nothing to pull')" "1"
+
+[[ $FAIL -eq 0 ]] && echo "All push and pull checks passed." || { echo "--- logs"; tail -15 "$HOME_DIR"/api-4611.log; exit 1; }

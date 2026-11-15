@@ -2,9 +2,11 @@ import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import type { ProviderSettings } from "@agentos/types";
+import type { Store } from "../lib/store.js";
+import { loginThrottle } from "../lib/limits.js";
 import { loadConfig, newApiKey, saveConfig, signSession, verifyPassword } from "../lib/config.js";
 import {
-  ACCESS_COOKIE, clearAuthCookies, requireAdmin, requireAuth, SESSION_COOKIE, setAuthCookies, WORKSPACE_COOKIE,
+  ACCESS_COOKIE, clearAuthCookies, cookieOpts, requireAdmin, requireAuth, SESSION_COOKIE, setAuthCookies, WORKSPACE_COOKIE,
 } from "../lib/auth.js";
 import { ApiError, badRequest, conflict, notFound, unauthorized } from "../lib/errors.js";
 import { checkKey, keyHint, listModels } from "../lib/openrouter.js";
@@ -27,19 +29,25 @@ x.post("/auth/login", async (c) => {
   if (AUTH_MODE === "supabase") {
     const email = (body.email ?? body.username ?? "").trim();
     if (!email) throw badRequest("Enter your email");
+    loginThrottle.check(c, email);
     const t = await signInWithPassword(email, body.password).catch(() => {
+      loginThrottle.failed(c, email);
       throw unauthorized("Incorrect email or password");
     });
+    loginThrottle.succeeded(email);
     setAuthCookies(c, t);
     return c.json({ email: t.user.email });
   }
   const cfg = loadConfig();
   if (!cfg) throw new ApiError(403, "permission_error", "AgentOS is not initialised. Run `pnpm agentos init` first.");
   const username = body.username ?? "";
+  loginThrottle.check(c, username);
   if (username !== cfg.admin.username || !verifyPassword(body.password, cfg.admin.salt, cfg.admin.password_hash)) {
+    loginThrottle.failed(c, username);
     throw unauthorized("Incorrect username or password");
   }
-  setCookie(c, SESSION_COOKIE, signSession(username, cfg.session_secret), { httpOnly: true, sameSite: "Lax", path: "/", maxAge: 60 * 60 * 12 });
+  loginThrottle.succeeded(username);
+  setCookie(c, SESSION_COOKIE, signSession(username, cfg.session_secret), cookieOpts(c, 60 * 60 * 12));
   return c.json({ username });
 });
 
@@ -55,7 +63,7 @@ x.post("/auth/signup", async (c) => {
   await store.workspaces.create(wsId, body.workspace_name ?? `${body.email.split("@")[0]}'s workspace`, user.id);
   if (tokens) {
     setAuthCookies(c, tokens);
-    setCookie(c, WORKSPACE_COOKIE, wsId, { httpOnly: true, sameSite: "Lax", path: "/" });
+    setCookie(c, WORKSPACE_COOKIE, wsId, cookieOpts(c));
   }
   return c.json({ email: user.email, workspace_id: wsId, needs_confirmation: !tokens }, tokens ? 200 : 202);
 });
@@ -96,7 +104,7 @@ x.post("/workspaces", requireAuth, supabaseOnly, async (c) => {
   const { name } = z.object({ name: z.string().trim().min(1).max(100) }).parse(await c.req.json());
   const id = newId("workspace");
   await c.get("store").workspaces.create(id, name, actor.id);
-  setCookie(c, WORKSPACE_COOKIE, id, { httpOnly: true, sameSite: "Lax", path: "/" });
+  setCookie(c, WORKSPACE_COOKIE, id, cookieOpts(c));
   return c.json({ id, name, role: "admin" });
 });
 
@@ -106,7 +114,7 @@ x.post("/workspaces/:id/select", requireAuth, supabaseOnly, async (c) => {
   const mine = actor.type === "user" ? await c.get("store").workspaces.membershipsOf(actor.id) : [];
   const ws = mine.find((w) => w.id === id);
   if (!ws) throw notFound("Workspace", id);
-  setCookie(c, WORKSPACE_COOKIE, id, { httpOnly: true, sameSite: "Lax", path: "/" });
+  setCookie(c, WORKSPACE_COOKIE, id, cookieOpts(c));
   return c.json(ws);
 });
 
@@ -153,7 +161,14 @@ x.delete("/workspace/members/:userId", requireAuth, supabaseOnly, requireAdmin, 
 
 /* ------------------------------------------------ OpenRouter provider */
 
-function providerView(): ProviderSettings {
+async function providerView(store: Store): Promise<ProviderSettings> {
+  if (AUTH_MODE === "supabase") {
+    const w = await store.workspaceSettings.openRouter();
+    if (!w.configured && process.env.OPENROUTER_API_KEY) {
+      return { provider: "openrouter", configured: true, key_hint: null, last_checked_at: null, status: "unknown", scope: "platform" };
+    }
+    return { provider: "openrouter", configured: w.configured, key_hint: w.hint, last_checked_at: w.checked_at, status: (w.status as ProviderSettings["status"]) ?? "unknown", scope: "workspace" };
+  }
   const or = loadConfig()?.openrouter;
   return {
     provider: "openrouter",
@@ -161,35 +176,56 @@ function providerView(): ProviderSettings {
     key_hint: or?.hint ?? null,
     last_checked_at: or?.last_checked_at ?? null,
     status: or?.status ?? "unknown",
+    scope: "local",
   };
 }
 
-x.get("/providers/openrouter", requireAuth, (c) => c.json(providerView()));
+// Cloud (Supabase) mode: each workspace brings its own key, kept in Supabase Vault.
+// Local mode: one key for the instance, in the local config file.
+x.get("/providers/openrouter", requireAuth, async (c) => c.json(await providerView(c.get("store"))));
 
 x.put("/providers/openrouter", requireAuth, requireAdmin, async (c) => {
-  const { api_key } = z.object({ api_key: z.string().min(10) }).parse(await c.req.json());
-  const cfg = loadConfig()!;
+  const { api_key } = z.object({ api_key: z.string().min(10).max(512) }).parse(await c.req.json());
   const check = await checkKey(api_key);
-  cfg.openrouter = { key: api_key, hint: keyHint(api_key), status: check.valid ? "valid" : "invalid", last_checked_at: nowIso() };
-  saveConfig(cfg);
-  return c.json(providerView());
+  const status = check.valid ? "valid" : "invalid";
+  const store = c.get("store");
+  if (AUTH_MODE === "supabase") {
+    await store.workspaceSettings.setOpenRouter(api_key, keyHint(api_key), status);
+  } else {
+    const cfg = loadConfig()!;
+    cfg.openrouter = { key: api_key, hint: keyHint(api_key), status, last_checked_at: nowIso() };
+    saveConfig(cfg);
+  }
+  return c.json(await providerView(store));
 });
 
 x.post("/providers/openrouter/test", requireAuth, async (c) => {
+  const store = c.get("store");
+  if (AUTH_MODE === "supabase") {
+    const key = await store.workspaceSettings.openRouterKey();
+    if (!key) throw new ApiError(400, "invalid_request_error", "This workspace has no OpenRouter key");
+    await store.workspaceSettings.setOpenRouterStatus((await checkKey(key)).valid ? "valid" : "invalid");
+    return c.json(await providerView(store));
+  }
   const cfg = loadConfig()!;
   if (!cfg.openrouter) throw new ApiError(400, "invalid_request_error", "No OpenRouter key is configured");
   const check = await checkKey(cfg.openrouter.key);
   cfg.openrouter.status = check.valid ? "valid" : "invalid";
   cfg.openrouter.last_checked_at = nowIso();
   saveConfig(cfg);
-  return c.json(providerView());
+  return c.json(await providerView(store));
 });
 
-x.delete("/providers/openrouter", requireAuth, requireAdmin, (c) => {
-  const cfg = loadConfig()!;
-  delete cfg.openrouter;
-  saveConfig(cfg);
-  return c.json(providerView());
+x.delete("/providers/openrouter", requireAuth, requireAdmin, async (c) => {
+  const store = c.get("store");
+  if (AUTH_MODE === "supabase") {
+    await store.workspaceSettings.clearOpenRouter();
+  } else {
+    const cfg = loadConfig()!;
+    delete cfg.openrouter;
+    saveConfig(cfg);
+  }
+  return c.json(await providerView(store));
 });
 
 /* ------------------------------------------------ Model catalog */

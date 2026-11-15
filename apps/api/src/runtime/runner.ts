@@ -2,6 +2,7 @@ import type { Agent, Environment, InboundEvent, Session, SessionEvent, StopReaso
 import { newId, nowIso } from "../lib/ids.js";
 import type { Store } from "../lib/store.js";
 import { storeScope } from "../lib/scope.js";
+import { resolveOpenRouterKey } from "../lib/provider-keys.js";
 import { bus } from "./bus.js";
 import { callModel, ModelError, type ChatMessage } from "./model.js";
 import { existsSync, readdirSync, statSync } from "node:fs";
@@ -353,6 +354,7 @@ export class SessionRuntime {
         overBudget: () => this.overBudget(session),
         interrupted: async () => this.interrupted(session, await this.allEvents(sessionId)),
         markProcessed: (id) => this.store.events.markProcessed(sessionId, id, nowIso()),
+        openRouterKey: () => resolveOpenRouterKey(this.store),
         loadState: () => this.store.sessions.getRuntimeState(sessionId),
         saveState: (state) => this.store.sessions.saveRuntimeState(sessionId, state),
         threadStore: this.store.threads,
@@ -396,7 +398,7 @@ export class SessionRuntime {
       const t0 = Date.now();
       let result;
       try {
-        result = await callModel(agent.model, messages, tools.map((t) => t.def), signal);
+        result = await callModel(agent.model, messages, tools.map((t) => t.def), signal, await resolveOpenRouterKey(this.store));
       } catch (err) {
         if ((err as Error).name === "AbortError" || signal.aborted) return this.interrupted(session, await this.allEvents(sessionId));
         const e = err as ModelError;

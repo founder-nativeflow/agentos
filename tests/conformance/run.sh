@@ -70,7 +70,7 @@ if [[ "$AUTH_MODE" == "supabase" ]]; then
   eval "$(cd "$ROOT" && supabase status -o env 2>/dev/null | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY)=')"
   export AGENTOS_AUTH=supabase SUPABASE_URL="$API_URL" SUPABASE_ANON_KEY="$ANON_KEY" SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY"
 fi
-AGENTOS_SCHEDULER_INTERVAL_MS=1000 AGENTOS_EGRESS_UPSTREAM_CA="$HOME_DIR/echo-ca.pem" PORT="$PORT" AGENTOS_WORKSPACE="$WORKSPACE" OPENROUTER_BASE_URL="http://localhost:$MOCK_PORT" OPENROUTER_API_KEY="mock" \
+AGENTOS_RATE_LIMIT_RPM=0 AGENTOS_MAX_RUNNING_SESSIONS=0 AGENTOS_ALLOW_PRIVATE_NETWORKS=1 AGENTOS_SCHEDULER_INTERVAL_MS=1000 AGENTOS_EGRESS_UPSTREAM_CA="$HOME_DIR/echo-ca.pem" PORT="$PORT" AGENTOS_WORKSPACE="$WORKSPACE" OPENROUTER_BASE_URL="http://localhost:$MOCK_PORT" OPENROUTER_API_KEY="mock" \
   node --import tsx src/index.ts > "$HOME_DIR/api.log" 2>&1 &
 API_PID=$!
 cd "$ROOT"
@@ -95,7 +95,7 @@ fi
 # 3. SDK tests.
 cd "$ROOT/tests/conformance"
 set +e
-AGENTOS_BASE_URL="http://localhost:$PORT" AGENTOS_API_KEY="$API_KEY" AGENTOS_MCP_URL="http://localhost:$MCP_PORT/mcp" npx vitest run "$@"
+AGENTOS_BASE_URL="http://localhost:$PORT" AGENTOS_API_KEY="$API_KEY" AGENTOS_MCP_URL="http://localhost:$MCP_PORT/mcp" AGENTOS_MOCK_URL="http://localhost:$MOCK_PORT" npx vitest run "$@"
 STATUS=$?
 set -e
 docker exec supabase_db_agentos psql -U postgres -tAc "select id from agentos.sessions where workspace_id = '$WORKSPACE' or workspace_id in (select m.workspace_id from agentos.workspace_members m join auth.users u on u.id = m.user_id where u.email like '${RUN_TAG}-%')" > "$HOME_DIR/sessions.txt" 2>/dev/null || true

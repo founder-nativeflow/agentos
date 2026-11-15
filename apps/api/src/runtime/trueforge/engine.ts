@@ -30,10 +30,10 @@ import type { Agent, Session, SessionEvent, SessionThread, StopReason } from "@a
 import { newId, nowIso } from "../../lib/ids.js";
 import type { Store } from "../../lib/store.js";
 import { listModels } from "../../lib/openrouter.js";
-import { openRouterKey } from "../model.js";
 import { callMcpTool } from "../mcp.js";
 import type { Sandbox } from "../sandbox.js";
 import { evaluate, runBuiltin, type ResolvedTool } from "../tools.js";
+import { ModelError } from "../model.js";
 import { proxiedBaseUrl } from "./openrouter-proxy.js";
 
 type AgentThread = InstanceType<typeof core.AgentThread>;
@@ -180,6 +180,8 @@ interface CmaThread {
 }
 
 interface SessionState {
+  /** The OpenRouter key the model clients were built with; a rotated key rebuilds the state. */
+  apiKey: string;
   /** trueforge thread id → thread ("main" is the session's primary thread). */
   threads: Map<string, AgentThread>;
   orchestrator: InstanceType<typeof core.AgentThreadOrchestrator>;
@@ -244,6 +246,8 @@ export interface TurnContext {
   /** Closes unanswered tool calls and idles the session (interrupt). */
   interrupted(): Promise<void>;
   markProcessed(eventId: string): Promise<void>;
+  /** The workspace's OpenRouter key (or the platform / local key). */
+  openRouterKey(): Promise<string>;
   loadState(): Promise<unknown>;
   saveState(state: unknown): Promise<void>;
   threadStore: Pick<Store["threads"], "insert" | "update" | "get">;
@@ -311,8 +315,11 @@ export class TrueForgeEngine {
   private states = new Map<string, SessionState>();
 
   private async state(ctx: TurnContext): Promise<SessionState> {
+    const apiKey = await ctx.openRouterKey();
     const cached = this.states.get(ctx.session.id);
-    if (cached) return cached;
+    if (cached && cached.apiKey === apiKey) return cached;
+    // First turn here, or the workspace key changed: rebuild from the persisted thread state.
+    this.states.delete(ctx.session.id);
 
     const toolset = new AgentOSToolSet(ctx.session.id);
     const model = ctx.agent.model;
@@ -324,7 +331,7 @@ export class TrueForgeEngine {
         model: { id: model.id, name: model.id },
         name: "openrouter",
         baseUrl: await proxiedBaseUrl(model),
-        apiKey: openRouterKey(),
+        apiKey,
         headers: { "HTTP-Referer": "https://agentos.dev", "X-Title": "AgentOS" },
       },
       logger,
@@ -400,6 +407,7 @@ export class TrueForgeEngine {
 
     const calls = new Map(saved?.calls ?? []);
     const st: SessionState = {
+      apiKey,
       threads,
       orchestrator,
       toolset,
@@ -441,7 +449,14 @@ export class TrueForgeEngine {
   }
 
   async turn(ctx: TurnContext): Promise<void> {
-    const st = await this.state(ctx);
+    let st: SessionState;
+    try {
+      st = await this.state(ctx);
+    } catch (err) {
+      if (!(err instanceof ModelError)) throw err;
+      await ctx.emit({ type: "session.error", error: { type: err.kind, message: err.message } });
+      return await ctx.setIdle({ type: "retries_exhausted" });
+    }
     const { toolset, orchestrator } = st;
     toolset.tools = ctx.tools;
     toolset.sandbox = ctx.sandbox;

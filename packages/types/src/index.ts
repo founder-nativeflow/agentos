@@ -521,4 +521,6 @@ export interface ProviderSettings {
   key_hint: string | null; // e.g. "sk-or-…a1b2"
   last_checked_at: string | null;
   status: "unknown" | "valid" | "invalid";
+  /** "workspace": this workspace's own key (cloud mode). "local": the instance key. "platform": none set; the operator's key is used. */
+  scope?: "workspace" | "local" | "platform";
 }

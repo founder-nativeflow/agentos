@@ -1,4 +1,5 @@
 import { CronExpressionParser } from "cron-parser";
+import { RateLimitError } from "../lib/limits.js";
 import type { Deployment, DeploymentRun, DeploymentTrigger, InboundEvent } from "@agentos/types";
 import { badRequest } from "../lib/errors.js";
 import { newId, nowIso } from "../lib/ids.js";
@@ -100,7 +101,9 @@ export async function runDeployment(
   } catch (err) {
     run.error = err instanceof SessionSetupError
       ? { type: err.setupType, message: err.message }
-      : { type: "unknown_error", message: (err as Error).message };
+      : err instanceof RateLimitError
+        ? { type: "rate_limit_error", message: err.message }
+        : { type: "unknown_error", message: (err as Error).message };
     if (err instanceof SessionSetupError && PAUSING.has(err.setupType)) {
       d.status = "paused";
       d.paused_reason = { type: "error", error: { type: err.setupType, message: err.message } };

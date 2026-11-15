@@ -49,6 +49,8 @@ const DEFAULT_IMAGE = process.env.AGENTOS_SANDBOX_IMAGE ?? "python:3.12-slim";
 const MAX_OUTPUT = 100_000;
 
 function run(args: string[], opts: { stdin?: string; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ExecResult> {
+  // Interrupted before the command started (e.g. while the sandbox was being created).
+  if (opts.signal?.aborted) return Promise.resolve({ stdout: "", stderr: "Interrupted", exitCode: 130, timedOut: false });
   return new Promise((done) => {
     const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";

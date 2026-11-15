@@ -1,4 +1,5 @@
 import type { Budget, InboundEvent, Metadata, Session, SessionResource } from "@agentos/types";
+import { assertCanStartTurn } from "../lib/limits.js";
 import { ApiError } from "../lib/errors.js";
 import { newId, nowIso } from "../lib/ids.js";
 import type { Store } from "../lib/store.js";
@@ -88,6 +89,7 @@ export async function createSession(store: Store, runtime: SessionRuntime, input
     updated_at: now,
     archived_at: null,
   };
+  if (input.initial_events?.some((e) => e.type === "user.message")) await assertCanStartTurn(store, "idle");
   await store.sessions.insert(session);
   if (input.initial_events?.length) await runtime.receive(session, input.initial_events);
   return session;

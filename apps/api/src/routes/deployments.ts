@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { limitWebhook } from "../lib/limits.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { Deployment, InboundEvent } from "@agentos/types";
@@ -257,6 +258,7 @@ export function webhookRoute(runtime: SessionRuntime) {
   r.post("/deployments/:id", async (c) => {
     const base = c.get("store");
     const id = c.req.param("id");
+    limitWebhook(c);
     const token = c.req.header("x-agentos-webhook-token") ?? c.req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
     const target = await base.deployments.forWebhook(id);
     const given = Buffer.from(sha256(token));

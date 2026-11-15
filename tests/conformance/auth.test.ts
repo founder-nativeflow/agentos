@@ -120,4 +120,43 @@ describe("Supabase Auth mode", () => {
     await s.user.call("/v1/x/auth/logout", { json: {} });
     expect((await s.user.call("/v1/agents")).status).toBe(401);
   });
+
+  it("uses each workspace's own OpenRouter key (BYOK), never returning it", async () => {
+    if (mode !== "supabase") return;
+    const mock = process.env.AGENTOS_MOCK_URL ?? "http://localhost:4199";
+    const d = await signUp("dave", "Dave Co");
+    const e = await signUp("erin", "Erin Co");
+    // No workspace key yet: the operator's platform key is used.
+    expect((await e.user.call("/v1/x/providers/openrouter")).body).toMatchObject({ configured: true, scope: "platform", key_hint: null });
+
+    expect((await d.user.call("/v1/x/providers/openrouter", { method: "PUT", json: { api_key: "not-a-real-key-123" } })).body.status).toBe("invalid");
+    const daveKey = `sk-or-${TAG}-dave-0001`;
+    const set = await d.user.call("/v1/x/providers/openrouter", { method: "PUT", json: { api_key: daveKey } });
+    expect(set.body).toMatchObject({ configured: true, scope: "workspace", status: "valid", key_hint: `${daveKey.slice(0, 6)}…${daveKey.slice(-4)}` });
+    expect(JSON.stringify(set.body)).not.toContain(daveKey);
+
+    const runOnce = async (client: Anthropic) => {
+      const env = await client.beta.environments.create({ name: "byok", config: { type: "cloud" } } as never);
+      const agent = await client.beta.agents.create({ name: "byok", model: "mock/model" } as never);
+      const s = await client.beta.sessions.create({ agent: agent.id, environment_id: env.id } as never);
+      await client.beta.sessions.events.send(s.id, { events: [{ type: "user.message", content: [{ type: "text", text: "hi" }] }] } as never);
+      for (let i = 0; i < 120; i++) {
+        const evs: Array<{ type: string }> = [];
+        for await (const ev of client.beta.sessions.events.list(s.id, { limit: 100 } as never)) evs.push(ev as never);
+        if (evs.some((x) => x.type === "session.status_idle")) return evs;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      throw new Error("session did not go idle");
+    };
+    const before = (await fetch(`${mock}/_keys_seen`).then((r) => r.json())).length as number;
+    await runOnce(await keyFor(d.user));
+    await runOnce(await keyFor(e.user));
+    const seen = (await fetch(`${mock}/_keys_seen`).then((r) => r.json())) as string[];
+    const recent = seen.slice(before);
+    expect(recent).toContain(daveKey);
+    expect(recent).toContain("mock");
+
+    // Removing the key falls back to the platform key.
+    expect((await d.user.call("/v1/x/providers/openrouter", { method: "DELETE" })).body.scope).toBe("platform");
+  });
 });

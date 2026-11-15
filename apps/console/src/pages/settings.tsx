@@ -71,11 +71,14 @@ function ProviderCard() {
           {s && <StatusBadge s={s} />}
         </div>
         <CardDescription>
-          One OpenRouter API key unlocks every OpenRouter model for your agents. It's stored only on this machine.
+          {s?.scope === "local" || !s
+            ? "One OpenRouter API key unlocks every OpenRouter model for your agents. It's stored only on this machine."
+            : "This workspace's own OpenRouter key: every session in the workspace uses it and is billed to it. It's kept encrypted in Supabase Vault and only admins can change it."}
+          {s?.scope === "platform" && " No key is set yet, so sessions use the platform's shared key."}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
-        {s?.configured && (
+        {s?.configured && s.scope !== "platform" && (
           <div className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
             <span className="font-mono">{s.key_hint}</span>
             <span className="text-muted-foreground">{s.last_checked_at ? `Checked ${timeAgo(s.last_checked_at)}` : "Not checked"}</span>
@@ -85,7 +88,7 @@ function ProviderCard() {
           </div>
         )}
         <form onSubmit={submit} className="grid gap-2">
-          <Label htmlFor="or-key">{s?.configured ? "Replace key" : "OpenRouter API key"}</Label>
+          <Label htmlFor="or-key">{s?.configured && s.scope !== "platform" ? "Replace key" : "OpenRouter API key"}</Label>
           <div className="flex gap-2">
             <Input id="or-key" type="password" placeholder="sk-or-…" value={key} onChange={(e) => { setKey(e.target.value); setError(null); }} />
             <Button type="submit" disabled={save.isPending}>{save.isPending ? "Saving…" : "Save & test"}</Button>

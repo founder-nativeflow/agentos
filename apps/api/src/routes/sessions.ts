@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { assertCanStartTurn } from "../lib/limits.js";
 import { streamSSE } from "hono/streaming";
 import { readdirSync, statSync, createReadStream, existsSync } from "node:fs";
 import { resolve, relative } from "node:path";
@@ -181,6 +182,7 @@ export function sessionRoutes(runtime: SessionRuntime) {
         if (!target || !wanted.includes(target.type)) throw badRequest(`${id} is not a pending ${wanted.join(" / ")} event in this session`);
       }
     }
+    if (parsed.some((e) => e.type === "user.message")) await assertCanStartTurn(store, s.status);
     const stored = await runtime.receive(s, parsed);
     return c.json({ data: stored });
   });

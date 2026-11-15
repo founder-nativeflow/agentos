@@ -109,6 +109,27 @@ const AGENT_FIELDS = ["name", "description", "system", "model", "tools", "mcp_se
 const stable = (v: unknown): string => JSON.stringify(v, (_k, val) =>
   val && typeof val === "object" && !Array.isArray(val) ? Object.fromEntries(Object.entries(val).sort(([a], [b]) => a.localeCompare(b))) : val);
 const withoutVersionTag = (m: Json = {}) => Object.fromEntries(Object.entries(m).filter(([k]) => k !== SOURCE_VERSION));
+const withoutTracking = (m: Json = {}) => Object.fromEntries(Object.entries(m).filter(([k]) => k !== SOURCE && k !== SOURCE_VERSION));
+
+/**
+ * The target-side copy of a source object: one whose metadata names the source as its origin
+ * (an earlier transfer this way), or the source's own origin (a round trip: pulling back what
+ * was pushed, or the reverse). Returns the match and whether it's the origin.
+ */
+function counterpart(targets: Json[], src: Json): { match: Json | undefined; origin: boolean } {
+  const forward = targets.find((t) => t.metadata?.[SOURCE] === src.id);
+  if (forward) return { match: forward, origin: false };
+  const origin = src.metadata?.[SOURCE] ? targets.find((t) => t.id === src.metadata[SOURCE]) : undefined;
+  return { match: origin, origin: Boolean(origin) };
+}
+/** Metadata to write on the target: the source's, plus tracking that points back at the source (or the origin's own tracking kept). */
+function trackedMetadata(src: Json, cp: { match: Json | undefined; origin: boolean }, extra: Json = {}): Json {
+  if (cp.origin) {
+    const keep = Object.fromEntries(Object.entries(cp.match?.metadata ?? {}).filter(([k]) => k === SOURCE || k === SOURCE_VERSION));
+    return { ...withoutTracking(src.metadata), ...keep };
+  }
+  return { ...withoutTracking(src.metadata), [SOURCE]: src.id, ...extra };
+}
 
 function flags(name: string): string[] {
   const out: string[] = [];
@@ -125,23 +146,32 @@ async function findBy(api: Api, list: string, ref: string, label: string): Promi
   throw new Error(hits.length ? `Several ${label}s are named "${ref}"; use the id` : `No ${label} named "${ref}" on ${api.name}`);
 }
 
-function cloudEnvConfig(cfg: Json): Json {
-  // A local Docker environment becomes a cloud one; networking and packages carry over.
-  return { ...cfg, type: "cloud" };
+/** Environments change type with the move: local Docker ↔ cloud. Networking and packages carry over. */
+function targetEnvConfig(cfg: Json, dir: Direction): Json {
+  return { ...cfg, type: dir === "push" ? "cloud" : "local" };
 }
 
-async function push(): Promise<void> {
+type Direction = "push" | "pull";
+
+/**
+ * push: copy a local agent version (+ environments, a deployment and its files) to a remote.
+ * pull: the reverse, from a remote to this install. Secrets and webhook tokens never move;
+ * deployments arrive paused unless --activate.
+ */
+async function transfer(dir: Direction): Promise<void> {
   const ref = process.argv[3];
-  const remoteName = flag("to");
+  const remoteName = flag(dir === "push" ? "to" : "from");
   if (!ref || !remoteName) {
-    console.log("Usage: agentos push <agent id|name> --to <remote> [--version N] [--env <id|name>] [--deployment <id>] [--activate] [--dry-run]");
+    console.log(`Usage: agentos ${dir} <agent id|name> --${dir === "push" ? "to" : "from"} <remote> [--version N] [--env <id|name>] [--deployment <id>] [--activate] [--dry-run]`);
     process.exitCode = 1;
     return;
   }
   const remote = loadRemotes()[remoteName];
   if (!remote) throw new Error(`No remote named "${remoteName}". Add one: agentos remote add ${remoteName} <url>`);
-  const src = localApi();
-  const dst = new Api(remoteName, remote.url, { "x-api-key": remote.api_key });
+  const remoteApi = new Api(remoteName, remote.url, { "x-api-key": remote.api_key });
+  const src = dir === "push" ? localApi() : remoteApi;
+  const dst = dir === "push" ? remoteApi : localApi();
+  const targetName = dst.name;
   const dry = has("dry-run");
   const steps: Step[] = [];
 
@@ -150,13 +180,14 @@ async function push(): Promise<void> {
   const version = flag("version") ? Number(flag("version")) : base.version;
   const agent = await src.call(`/v1/agents/${base.id}?version=${version}`);
   const spec: Json = Object.fromEntries(AGENT_FIELDS.map((k) => [k, agent[k]]));
-  spec.metadata = { ...withoutVersionTag(agent.metadata), [SOURCE]: agent.id, [SOURCE_VERSION]: String(agent.version) };
-  if (Object.keys(spec.metadata).length > 16) throw new Error("The agent has too many metadata keys to add push tracking (max 16)");
+  const agentLink = counterpart(await dst.all("/v1/agents"), agent);
+  spec.metadata = trackedMetadata(agent, agentLink, { [SOURCE_VERSION]: String(agent.version) });
+  if (Object.keys(spec.metadata).length > 16) throw new Error(`The agent has too many metadata keys to add ${dir} tracking (max 16)`);
 
-  const existing = (await dst.all("/v1/agents")).find((a) => a.metadata?.[SOURCE] === agent.id);
+  const existing = agentLink.match;
   const target: { id: string | null; version: number | null } = { id: existing?.id ?? null, version: existing?.version ?? null };
   if (!existing) {
-    steps.push({ kind: "create", what: "agent", detail: `${agent.name} (local v${agent.version})`, run: async () => {
+    steps.push({ kind: "create", what: "agent", detail: `${agent.name} (${src.name} v${agent.version})`, run: async () => {
       const created = await dst.call("/v1/agents", { json: spec });
       target.id = created.id;
       target.version = created.version;
@@ -165,12 +196,12 @@ async function push(): Promise<void> {
     const changed = AGENT_FIELDS.some((k) => stable(existing[k]) !== stable(spec[k])) ||
       stable(withoutVersionTag(existing.metadata)) !== stable(withoutVersionTag(spec.metadata));
     if (changed) {
-      steps.push({ kind: "update", what: "agent", detail: `${agent.name}: ${remoteName} v${existing.version} → v${existing.version + 1} (from local v${agent.version})`, run: async () => {
+      steps.push({ kind: "update", what: "agent", detail: `${agent.name}: ${targetName} v${existing.version} → v${existing.version + 1} (from ${src.name} v${agent.version})`, run: async () => {
         const updated = await dst.call(`/v1/agents/${existing.id}`, { json: { ...spec, version: existing.version } });
         target.version = updated.version;
       } });
     } else {
-      steps.push({ kind: "unchanged", what: "agent", detail: `${agent.name} (${remoteName} v${existing.version})` });
+      steps.push({ kind: "unchanged", what: "agent", detail: `${agent.name} (${targetName} v${existing.version})` });
     }
   }
 
@@ -182,25 +213,26 @@ async function push(): Promise<void> {
     for (const s of servers) {
       const ok = creds.some((cr) => cr.auth?.type === "static_bearer" && String(cr.auth.mcp_server_url).replace(/\/+$/, "") === s.url.replace(/\/+$/, ""));
       steps.push(ok
-        ? { kind: "unchanged", what: "credential", detail: `MCP ${s.name}: a ${remoteName} vault has a token for ${s.url}` }
-        : { kind: "warn", what: "credential", detail: `MCP ${s.name}: no token for ${s.url} on ${remoteName}; add a static_bearer credential to a vault there (secrets are never copied)` });
+        ? { kind: "unchanged", what: "credential", detail: `MCP ${s.name}: a ${targetName} vault has a token for ${s.url}` }
+        : { kind: "warn", what: "credential", detail: `MCP ${s.name}: no token for ${s.url} on ${targetName}; add a static_bearer credential to a vault there (secrets are never copied)` });
     }
   }
 
   /* ---- deployment (reads first: it decides which environment and files are needed) */
   const deplId = flag("deployment");
-  const localDepl = deplId ? await src.call(`/v1/deployments/${deplId}`) : null;
-  if (localDepl && localDepl.agent.id !== agent.id) throw new Error(`Deployment ${deplId} runs a different agent (${localDepl.agent.id})`);
+  const srcDepl = deplId ? await src.call(`/v1/deployments/${deplId}`) : null;
+  if (srcDepl && srcDepl.agent.id !== agent.id) throw new Error(`Deployment ${deplId} runs a different agent (${srcDepl.agent.id})`);
 
   /* ---- environments */
   const envRefs = new Set(flags("env"));
-  if (localDepl) envRefs.add(localDepl.environment_id);
+  if (srcDepl) envRefs.add(srcDepl.environment_id);
   const envMap = new Map<string, string | null>(); // local env id → target env id (null until created)
   const dstEnvs = envRefs.size ? await dst.all("/v1/environments") : [];
   for (const r of envRefs) {
     const env = await findBy(src, "/v1/environments", r, "environment");
-    const want = { name: env.name, description: env.description, config: cloudEnvConfig(env.config), metadata: { ...env.metadata, [SOURCE]: env.id } };
-    const match = dstEnvs.find((e) => e.metadata?.[SOURCE] === env.id) ?? dstEnvs.find((e) => e.name === env.name);
+    const link = counterpart(dstEnvs, env);
+    const match = link.match ?? dstEnvs.find((e) => e.name === env.name);
+    const want = { name: env.name, description: env.description, config: targetEnvConfig(env.config, dir), metadata: trackedMetadata(env, { match, origin: link.origin }) };
     if (!match) {
       envMap.set(env.id, null);
       steps.push({ kind: "create", what: "environment", detail: env.name, run: async () => {
@@ -208,30 +240,31 @@ async function push(): Promise<void> {
       } });
     } else {
       envMap.set(env.id, match.id);
-      const changed = stable(match.config) !== stable(want.config) || match.description !== want.description || match.metadata?.[SOURCE] !== env.id;
+      const changed = stable(match.config) !== stable(want.config) || match.description !== want.description || stable(match.metadata ?? {}) !== stable(want.metadata);
       steps.push(changed
         ? { kind: "update", what: "environment", detail: env.name, run: async () => void (await dst.call(`/v1/environments/${match.id}`, { json: want })) }
         : { kind: "unchanged", what: "environment", detail: env.name });
     }
   }
 
-  if (localDepl) {
+  if (srcDepl) {
     // Vaults: matched by display name; missing ones stop the push before any write.
-    const localVaults = await Promise.all((localDepl.vault_ids as string[]).map((id) => src.call(`/v1/vaults/${id}`)));
-    const dstVaults = localVaults.length ? await dst.all("/v1/vaults") : [];
+    const srcVaults = await Promise.all((srcDepl.vault_ids as string[]).map((id) => src.call(`/v1/vaults/${id}`)));
+    const dstVaults = srcVaults.length ? await dst.all("/v1/vaults") : [];
     const vaultIds: string[] = [];
-    for (const v of localVaults) {
+    for (const v of srcVaults) {
       const m = dstVaults.find((x) => x.display_name === v.display_name);
-      if (!m) throw new Error(`The deployment uses vault "${v.display_name}", which doesn't exist on ${remoteName}. Create it there (with its credentials), then push again.`);
+      if (!m) throw new Error(`The deployment uses vault "${v.display_name}", which doesn't exist on ${targetName}. Create it there (with its credentials), then ${dir} again.`);
       vaultIds.push(m.id);
-      steps.push({ kind: "unchanged", what: "vault", detail: `${v.display_name} → ${remoteName} vault ${m.id} (secrets stay where they are)` });
+      steps.push({ kind: "unchanged", what: "vault", detail: `${v.display_name} → ${targetName} vault ${m.id} (secrets stay where they are)` });
     }
     const dstDepls = await dst.all("/v1/deployments");
-    const match = dstDepls.find((d) => d.metadata?.[SOURCE] === localDepl.id);
+    const deplLink = counterpart(dstDepls, srcDepl);
+    const match = deplLink.match;
     // Files: uploaded to the target, unless the target deployment already has the same file
     // (same mount path, name and size) from an earlier push.
     const resources: Json[] = [];
-    for (const r of localDepl.resources as Json[]) {
+    for (const r of srcDepl.resources as Json[]) {
       const meta = await src.call(`/v1/files/${r.file_id}`);
       const entry: Json = { type: "file", file_id: "", mount_path: r.mount_path ?? null };
       resources.push(entry);
@@ -239,7 +272,7 @@ async function push(): Promise<void> {
       const priorMeta = prior ? await dst.call(`/v1/files/${prior.file_id}`).catch(() => null) : null;
       if (priorMeta && priorMeta.filename === meta.filename && priorMeta.size_bytes === meta.size_bytes) {
         entry.file_id = priorMeta.id;
-        steps.push({ kind: "unchanged", what: "file", detail: `${meta.filename} (already on ${remoteName})` });
+        steps.push({ kind: "unchanged", what: "file", detail: `${meta.filename} (already on ${targetName})` });
         continue;
       }
       steps.push({ kind: "upload", what: "file", detail: `${meta.filename} (${meta.size_bytes} bytes)`, run: async () => {
@@ -249,19 +282,19 @@ async function push(): Promise<void> {
       } });
     }
     const build = (): Json => ({
-      name: localDepl.name,
-      description: localDepl.description,
+      name: srcDepl.name,
+      description: srcDepl.description,
       agent: { type: "agent", id: target.id, version: target.version },
-      environment_id: envMap.get(localDepl.environment_id),
-      initial_events: localDepl.initial_events,
-      schedule: localDepl.schedule ? { type: "cron", expression: localDepl.schedule.expression, timezone: localDepl.schedule.timezone } : null,
-      budget: localDepl.budget,
+      environment_id: envMap.get(srcDepl.environment_id),
+      initial_events: srcDepl.initial_events,
+      schedule: srcDepl.schedule ? { type: "cron", expression: srcDepl.schedule.expression, timezone: srcDepl.schedule.timezone } : null,
+      budget: srcDepl.budget,
       vault_ids: vaultIds,
       resources,
-      metadata: { ...localDepl.metadata, [SOURCE]: localDepl.id },
+      metadata: trackedMetadata(srcDepl, deplLink),
     });
     if (!match) {
-      steps.push({ kind: "create", what: "deployment", detail: `${localDepl.name}${has("activate") ? " (active)" : " (paused: start it with --activate or in the Console)"}`, run: async () => {
+      steps.push({ kind: "create", what: "deployment", detail: `${srcDepl.name}${has("activate") ? " (active)" : " (paused: start it with --activate or in the Console)"}`, run: async () => {
         const created = await dst.call("/v1/deployments", { json: build() });
         if (!has("activate")) await dst.call(`/v1/deployments/${created.id}/pause`, { json: {} });
       } });
@@ -275,21 +308,23 @@ async function push(): Promise<void> {
         budget: match.budget, vault_ids: match.vault_ids, resources: match.resources, metadata: null,
       })
     ) {
-      steps.push({ kind: "unchanged", what: "deployment", detail: `${localDepl.name} (${match.status})` });
+      steps.push({ kind: "unchanged", what: "deployment", detail: `${srcDepl.name} (${match.status})` });
     } else {
-      steps.push({ kind: "update", what: "deployment", detail: `${localDepl.name} (pinned to the pushed version; status stays ${match.status})`, run: async () => {
+      steps.push({ kind: "update", what: "deployment", detail: `${srcDepl.name} (pinned to the ${dir === "push" ? "pushed" : "pulled"} version; status stays ${match.status})`, run: async () => {
         await dst.call(`/v1/deployments/${match.id}`, { json: build() });
         if (has("activate") && match.status === "paused") await dst.call(`/v1/deployments/${match.id}/unpause`, { json: {} });
       } });
     }
-    if (localDepl.x_webhook?.enabled) {
-      steps.push({ kind: "warn", what: "webhook", detail: `webhook tokens aren't copied; enable one on ${remoteName}: POST /v1/deployments/{id}/webhook` });
+    if (srcDepl.x_webhook?.enabled) {
+      steps.push({ kind: "warn", what: "webhook", detail: `webhook tokens aren't copied; enable one on ${targetName}: POST /v1/deployments/{id}/webhook` });
     }
   }
 
   /* ---- print + apply */
   const icon = { create: c.green("+"), update: c.yellow("~"), unchanged: c.dim("="), warn: c.red("!"), upload: c.green("↑") };
-  console.log(`${c.bold(dry ? "Plan" : "Pushing")} ${agent.name} v${agent.version} → ${c.cyan(remoteName)} ${c.dim(`(${remote.url})`)}`);
+  console.log(dir === "push"
+    ? `${c.bold(dry ? "Plan" : "Pushing")} ${agent.name} v${agent.version} → ${c.cyan(remoteName)} ${c.dim(`(${remote.url})`)}`
+    : `${c.bold(dry ? "Plan" : "Pulling")} ${agent.name} v${agent.version} ← ${c.cyan(remoteName)} ${c.dim(`(${remote.url})`)}`);
   // Environments and files first (deployments need them), then the agent, then the deployment.
   const order = ["environment", "file", "agent", "credential", "vault", "deployment", "webhook"];
   const ordered = [...steps].sort((a, b) => order.indexOf(a.what) - order.indexOf(b.what));
@@ -300,7 +335,9 @@ async function push(): Promise<void> {
   }
   for (const s of ordered) if (s.run) await s.run();
   const changes = ordered.filter((s) => s.run).length;
-  console.log(changes ? c.green(`\n✔ Pushed (${changes} change${changes === 1 ? "" : "s"}). ${remoteName} agent ${target.id} v${target.version}`) : c.dim("\nNothing to push: already up to date."));
+  console.log(changes
+    ? c.green(`\n✔ ${dir === "push" ? "Pushed" : "Pulled"} (${changes} change${changes === 1 ? "" : "s"}). ${targetName} agent ${target.id} v${target.version}`)
+    : c.dim(`\nNothing to ${dir}: already up to date.`));
 }
 
 /* -------------------------------------------------------------------- CLI */
@@ -333,4 +370,5 @@ export async function remoteCommand(sub?: string, name?: string, url?: string): 
   console.log("Usage: agentos remote <add <name> <url> [--key-stdin] | list | remove <name>>");
 }
 
-export const pushCommand = push;
+export const pushCommand = () => transfer("push");
+export const pullCommand = () => transfer("pull");

@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { assertPublicUrl } from "../lib/net-guard.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Agent, McpServer, McpToolset } from "@agentos/types";
 import type { ResolvedTool } from "./tools.js";
@@ -29,6 +30,7 @@ const pool = new Map<string, Map<string, Connection>>();
 const hash = (s: string | null) => (s ? `${s.length}:${s.slice(-6)}` : "none");
 
 async function connect(server: McpServer, token: string | null): Promise<Connection> {
+  await assertPublicUrl(server.url);
   const transport = new StreamableHTTPClientTransport(new URL(server.url), {
     requestInit: token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
   });

@@ -41,7 +41,7 @@ export async function listModels(force = false): Promise<OpenRouterModel[]> {
 
 /** Validates an OpenRouter key by asking OpenRouter about it. */
 export async function checkKey(key: string): Promise<{ valid: boolean; detail?: unknown }> {
-  const res = await fetch(`${BASE}/key`, { headers: { Authorization: `Bearer ${key}`, "User-Agent": "AgentOS" } });
+  const res = await fetch(`${process.env.OPENROUTER_BASE_URL ?? BASE}/key`, { headers: { Authorization: `Bearer ${key}`, "User-Agent": "AgentOS" } });
   if (!res.ok) return { valid: false };
   return { valid: true, detail: await res.json().catch(() => undefined) };
 }

@@ -137,6 +137,10 @@ export class Store {
   /* -------------------------------------------------------------- sessions */
 
   sessions = {
+    countRunning: async (): Promise<number> => {
+      const [r] = await this.sql`select count(*)::int as n from agentos.sessions where workspace_id = ${this.workspaceId} and status = 'running' and archived_at is null`;
+      return Number(r?.n ?? 0);
+    },
     insert: async (s: Session): Promise<void> => {
       await this.sql`
         insert into agentos.sessions (id, workspace_id, agent_id, agent_version, environment_id, deployment_id, title, status,
@@ -184,6 +188,47 @@ export class Store {
     listRunning: async (): Promise<Session[]> => {
       const rows = await this.sql`select * from agentos.sessions where workspace_id = ${this.workspaceId} and status = 'running'`;
       return rows.map(toSession);
+    },
+  };
+
+  /* ------------------------------------------- workspace settings (scoped) */
+
+  workspaceSettings = {
+    openRouter: async (): Promise<{ hint: string | null; status: string | null; checked_at: string | null; configured: boolean }> => {
+      const rows = await this.sql`
+        select openrouter_secret_id, openrouter_hint, openrouter_status, openrouter_checked_at from agentos.workspaces where id = ${this.workspaceId}`;
+      const r = rows[0];
+      return {
+        configured: Boolean(r?.openrouter_secret_id),
+        hint: (r?.openrouter_hint as string | null) ?? null,
+        status: (r?.openrouter_status as string | null) ?? null,
+        checked_at: iso(r?.openrouter_checked_at),
+      };
+    },
+    setOpenRouter: async (key: string, hint: string, status: string): Promise<void> => {
+      await this.sql.begin(async (tx) => {
+        const [row] = await tx`select openrouter_secret_id from agentos.workspaces where id = ${this.workspaceId} for update`;
+        if (row?.openrouter_secret_id) {
+          await tx`select vault.update_secret(${row.openrouter_secret_id}, ${key})`;
+        } else {
+          const [s] = await tx`select vault.create_secret(${key}, ${`agentos:openrouter:${this.workspaceId}`}, 'AgentOS workspace OpenRouter key') as id`;
+          await tx`update agentos.workspaces set openrouter_secret_id = ${s!.id} where id = ${this.workspaceId}`;
+        }
+        await tx`update agentos.workspaces set openrouter_hint = ${hint}, openrouter_status = ${status}, openrouter_checked_at = now() where id = ${this.workspaceId}`;
+      });
+    },
+    setOpenRouterStatus: async (status: string): Promise<void> => {
+      await this.sql`update agentos.workspaces set openrouter_status = ${status}, openrouter_checked_at = now() where id = ${this.workspaceId}`;
+    },
+    clearOpenRouter: async (): Promise<void> => {
+      await this.sql`delete from vault.secrets where id = (select openrouter_secret_id from agentos.workspaces where id = ${this.workspaceId})`;
+      await this.sql`update agentos.workspaces set openrouter_secret_id = null, openrouter_hint = null, openrouter_status = null, openrouter_checked_at = null where id = ${this.workspaceId}`;
+    },
+    /** Decrypted key, for model calls only. */
+    openRouterKey: async (): Promise<string | null> => {
+      const rows = await this.sql`
+        select s.decrypted_secret from agentos.workspaces w join vault.decrypted_secrets s on s.id = w.openrouter_secret_id where w.id = ${this.workspaceId}`;
+      return (rows[0]?.decrypted_secret as string | undefined) ?? null;
     },
   };
 

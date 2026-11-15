@@ -44,6 +44,8 @@ function script(messages) {
     const users = messages.filter((m) => m.role === "user").length;
     return reply({ content: `I see ${users} user messages.` });
   }
+  const fetchUrl = lastUser.match(/^fetch url (\S+)/);
+  if (fetchUrl) return reply({ toolCalls: [call("c1", "web_fetch", { url: fetchUrl[1] })] });
   if (lastUser.includes("egress test")) {
     return reply({ toolCalls: [call("c1", "bash", { command: EGRESS_CMD })] });
   }
@@ -75,11 +77,27 @@ function script(messages) {
   return reply({ content: "Hello from the mock model." });
 }
 
+// The key on each model call, so tests can check which key a workspace used (BYOK).
+const keysSeen = [];
+
 createServer((req, res) => {
   let body = "";
   req.on("data", (d) => (body += d));
   req.on("end", () => {
+    if (req.url === "/_keys_seen") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(keysSeen));
+      return;
+    }
+    if (req.url?.endsWith("/key") && req.method === "GET") {
+      // Key check: keys that start with sk-or- are "valid".
+      const ok = /^Bearer sk-or-/.test(req.headers.authorization ?? "");
+      res.writeHead(ok ? 200 : 401, { "content-type": "application/json" });
+      res.end(JSON.stringify(ok ? { data: { label: "mock" } } : { error: { message: "invalid key" } }));
+      return;
+    }
     if (req.url?.endsWith("/chat/completions") && req.method === "POST") {
+      keysSeen.push(String(req.headers.authorization ?? "").replace(/^Bearer /, ""));
       const { messages, stream } = JSON.parse(body);
       const out = script(messages);
       if (!stream) {
