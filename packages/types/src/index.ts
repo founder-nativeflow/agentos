@@ -33,6 +33,9 @@ export const ID_PREFIX = {
   worker: "wrk_", // AgentOS extension
   thread: "sthr_",
   workspace: "wrkspc_",
+  workflow: "wf_", // AgentOS extension
+  workflowExecution: "wfrun_", // AgentOS extension
+  builderChat: "bchat_", // AgentOS extension
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;
@@ -523,4 +526,165 @@ export interface ProviderSettings {
   status: "unknown" | "valid" | "invalid";
   /** "workspace": this workspace's own key (cloud mode). "local": the instance key. "platform": none set; the operator's key is used. */
   scope?: "workspace" | "local" | "platform";
+}
+
+/* ------------------------------------------------- Workflows (AgentOS extension) */
+
+/**
+ * A workflow is a graph of steps. Agent steps run as ordinary sessions; later steps read
+ * earlier outputs with templates: {{input}} and {{nodes.<id>.output}}.
+ * A step runs once every *active* incoming connection has finished: branches a Condition or
+ * Router didn't take are skipped, and independent branches run in parallel.
+ */
+export interface WorkflowPosition { x: number; y: number }
+interface WorkflowNodeBase { id: string; label: string; position?: WorkflowPosition | null }
+export interface WorkflowStartNode extends WorkflowNodeBase {
+  type: "start";
+  /** What the run's input should contain (shown in the Run dialog). */
+  input_description?: string | null;
+}
+export interface WorkflowAgentNode extends WorkflowNodeBase {
+  type: "agent";
+  /** version null = the agent's latest version when the run starts. */
+  agent: { id: string; version?: number | null };
+  /** The task sent to the agent; a template. */
+  prompt: string;
+}
+export interface WorkflowConditionNode extends WorkflowNodeBase {
+  type: "condition";
+  /** Template evaluated at run time, usually {{nodes.<id>.output}}. */
+  source: string;
+  operator: "contains" | "not_contains" | "equals" | "matches";
+  value: string;
+}
+export interface WorkflowRouterNode extends WorkflowNodeBase {
+  type: "router";
+  /** Template the model reads to choose a route. */
+  source: string;
+  routes: Array<{ key: string; description: string }>;
+  /** Model that chooses the route (default: the workspace's builder model). */
+  model?: string | null;
+}
+export interface WorkflowOutputNode extends WorkflowNodeBase {
+  type: "output";
+  /** Template for the run's result. */
+  template: string;
+}
+export type WorkflowNode = WorkflowStartNode | WorkflowAgentNode | WorkflowConditionNode | WorkflowRouterNode | WorkflowOutputNode;
+export type WorkflowNodeType = WorkflowNode["type"];
+
+export interface WorkflowEdge {
+  id: string;
+  source: string;
+  target: string;
+  /** Condition: "true" | "false". Router: a route key. Otherwise omitted. */
+  branch?: string | null;
+}
+
+export interface Workflow {
+  type: "workflow";
+  id: string;
+  version: number;
+  name: string;
+  description: string | null;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  /** Environment for agent steps' sessions. */
+  environment_id: string;
+  vault_ids: string[];
+  metadata: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+}
+
+export type WorkflowStepStatus = "pending" | "running" | "succeeded" | "failed" | "skipped";
+export interface WorkflowStepState {
+  status: WorkflowStepStatus;
+  session_id?: string | null;
+  output?: string | null;
+  /** Condition / Router: the branch taken. */
+  branch?: string | null;
+  error?: string | null;
+  cost_usd?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+}
+export interface WorkflowRun {
+  type: "workflow_run";
+  id: string;
+  workflow_id: string;
+  workflow_version: number;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  input: string;
+  output: string | null;
+  error: { type: string; message: string } | null;
+  steps: Record<string, WorkflowStepState>;
+  cost_usd: string;
+  trigger: { type: "manual" | "builder_test" };
+  created_at: string;
+  ended_at: string | null;
+}
+
+/* ------------------------------------------------- Builder (AgentOS extension) */
+
+/**
+ * The structured plan the builder keeps behind a chat. A short prompt is expanded into this,
+ * then applied: agents (and an environment) are created and, for "workflow", the workflow.
+ */
+export interface BuilderAgentDraft {
+  key: string;
+  name: string;
+  description: string;
+  model: string;
+  system: string;
+  /** Built-in toolset on/off, plus allow sub-agents for "team". */
+  toolset: boolean;
+  subagents: boolean;
+  mcp_servers: Array<{ name: string; url: string }>;
+}
+export type BuilderWorkflowNode = Exclude<WorkflowNode, WorkflowAgentNode> | (Omit<WorkflowAgentNode, "agent"> & { agent_key: string });
+export interface BuilderPlan {
+  kind: "agent" | "team" | "workflow";
+  title: string;
+  summary: string;
+  /** The reasoning outline: what the builder decided and why, step by step. */
+  steps: Array<{ title: string; detail: string }>;
+  assumptions: string[];
+  open_questions: string[];
+  agents: BuilderAgentDraft[];
+  environment: { name: string; networking: "unrestricted" | "limited"; allowed_hosts: string[]; pip: string[]; npm: string[] };
+  /** For kind "workflow": nodes reference agents by `agent_key` instead of an id. */
+  workflow: null | {
+    name: string;
+    description: string;
+    nodes: BuilderWorkflowNode[];
+    edges: WorkflowEdge[];
+  };
+  test_input: string;
+}
+export interface BuilderMessage {
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+  /** assistant: what changed in the plan this turn. */
+  changes?: string[];
+}
+export interface BuilderChat {
+  type: "builder_chat";
+  id: string;
+  title: string;
+  model: string;
+  messages: BuilderMessage[];
+  plan: BuilderPlan | null;
+  /** Set after "Create": the ids of what was created. */
+  applied: null | {
+    /** draft agent key → created agent id */
+    agents: Record<string, string>;
+    environment_id: string;
+    workflow_id: string | null;
+    applied_at: string;
+  };
+  created_at: string;
+  updated_at: string;
 }

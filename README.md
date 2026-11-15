@@ -34,7 +34,9 @@ Managed agents you can run **on your own machine** or **in the cloud**, powered 
 | Security defaults: allow-listed CORS, Secure/HttpOnly cookies, security headers, body-size limit, SSRF guard for `web_fetch` and MCP URLs | ✅ |
 | `agentos backup` / `restore` (database, files, config; secrets only on request); `agentos push` / `pull` between installs with round-trip detection | ✅ |
 | E2B cloud sandboxes, Railway deploy files, `agentos cloud init/check` | ✅ built; ⏳ not yet deployed (needs the hosting accounts) |
-| Laptop workers, MCP OAuth credentials | ⏳ v1.x |
+| **Builder** (Console → Create): describe what you want in a sentence; a builder model turns it into a structured plan (one agent, a team, or a workflow; its reasoning steps, assumptions, open questions, agents with full prompts, environment, test input), validated server-side and repaired once if needed. Revise it by chatting or on the canvas, then Create (applying again updates the same agents and workflow), then Test run. API: `/v1/x/builder/chats` | ✅ AgentOS extension |
+| **Workflows** (Console → Workflows): a canvas of Start, Agent, Condition, Router (a model picks the route) and Output steps; `{{input}}` / `{{nodes.<id>.output}}` templates; branches not taken are skipped and independent steps run in parallel; every agent step is a normal session; versions, runs with live per-step status, cancel. API: `/v1/x/workflows`, `/v1/x/workflow_runs` | ✅ AgentOS extension |
+| Laptop workers, MCP OAuth credentials; workflows in deployments and `push`/`pull` | ⏳ v1.x |
 | `mcp_oauth` credentials, memory, skills | ⏳ Phase 3; unbuilt resources | ⏳ Answer `404 not_found_error` "not implemented yet (planned: Phase N)" |
 
 ## Requirements
@@ -111,6 +113,8 @@ pnpm test:conformance    # throwaway API on :4100 + a scripted mock model on :41
 | `AGENTOS_COMPACTION` | on | `off` disables context compaction |
 | `AGENTOS_COMPACTION_THRESHOLD_TOKENS` | from the model's context length | Compact when the context exceeds this |
 | `AGENTOS_MAX_OUTPUT_TOKENS` | `8192` | Default output cap per model call |
+| `AGENTOS_BUILDER_MODEL` | `qwen/qwen3-coder` | Default model for the builder chat and workflow routers (each chat can pick another) |
+| `AGENTOS_WORKFLOW_STEP_TIMEOUT_MS` | `1800000` | How long one workflow agent step may run |
 | Limits and security | see [docs/operations.md](docs/operations.md) | `AGENTOS_RATE_LIMIT_RPM`, `AGENTOS_MAX_RUNNING_SESSIONS`, `AGENTOS_CORS_ORIGINS`, `AGENTOS_TRUST_PROXY`, `AGENTOS_ALLOW_PRIVATE_NETWORKS`, … |
 
 ## Contributing

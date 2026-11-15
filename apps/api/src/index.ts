@@ -21,6 +21,8 @@ import { vaults } from "./routes/vaults.js";
 import { deploymentRoutes, deploymentRunRoutes, webhookRoute } from "./routes/deployments.js";
 import { startScheduler } from "./runtime/deployments.js";
 import { planned } from "./routes/planned.js";
+import { workflowRoutes, workflowRunRoutes } from "./routes/workflows.js";
+import { builderRoutes } from "./routes/builder.js";
 import { x } from "./routes/x.js";
 
 const store = new Store();
@@ -99,6 +101,9 @@ app.route("/v1/files", files);
 app.route("/v1/vaults", vaults);
 app.route("/v1/deployments", deploymentRoutes(runtime));
 app.route("/v1/deployment_runs", deploymentRunRoutes());
+app.route("/v1/x/workflows", workflowRoutes(runtime));
+app.route("/v1/x/workflow_runs", workflowRunRoutes(runtime));
+app.route("/v1/x/builder", builderRoutes(runtime));
 app.route("/v1", planned);
 
 app.notFound((c) => c.json(errorBody(c, "not_found_error", `No route for ${c.req.method} ${c.req.path}`), 404));
@@ -110,6 +115,8 @@ async function main() {
   try {
     if (AUTH_MODE === "local") await store.init(); // Supabase mode: workspaces are created by users
     await runtime.recover();
+    const interrupted = await store.workflowRuns.failInterrupted();
+    if (interrupted) console.log(`[workflows] ${interrupted} run(s) interrupted by the restart were marked failed`);
     startScheduler(store, runtime);
   } catch (err) {
     console.error(`Could not connect to the database. Is local Supabase running? (pnpm db:start)\n${(err as Error).message}`);

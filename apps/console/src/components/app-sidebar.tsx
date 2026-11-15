@@ -41,7 +41,7 @@ const groups = [
       { to: "/agents", label: "Agents", icon: Bot },
       { to: "/sessions", label: "Sessions", icon: MessagesSquare },
       { to: "/deployments", label: "Deployments", icon: CalendarClock },
-      { to: "/pipelines", label: "Pipelines", icon: Workflow },
+      { to: "/workflows", label: "Workflows", icon: Workflow },
       { to: "/environments", label: "Environments", icon: Boxes },
       { to: "/memory", label: "Memory", icon: Database },
       { to: "/vaults", label: "Credential vaults", icon: KeyRound },

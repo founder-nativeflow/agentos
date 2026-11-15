@@ -56,6 +56,8 @@ apps/api/src
     mcp.ts                 MCP client (Streamable HTTP), bearer tokens from vaults
     deployments.ts         cron scheduler and deployment runs
     session-service.ts     session creation shared by the API and deployments
+    workflows.ts           workflow engine: validation, templates, scheduler (parallel steps, skipped branches), router, cancel
+    builder.ts             builder: prompt → structured plan (schema + graph checks, one repair turn, layout), apply, test
   egress/                  egress proxy (allowed hosts, secret injection) and its container manager
 apps/console/src           React + Vite Console (pages/, components/, lib/api.ts)
 apps/cli/src               `agentos` CLI: init, dev, run, cloud, remote, push, pull, backup, restore
@@ -90,6 +92,13 @@ deploy/                    Dockerfiles, Railway config, Caddyfile for the hosted
 
 `user.interrupt` aborts the turn's `AbortController`; tools must honour the signal (including an
 already-aborted one, see `run()` in `sandbox.ts`).
+
+## 4b. Workflows and the builder
+
+- A workflow (`/v1/x/workflows`) is a versioned graph: `start`, `agent` (agent id + optional pinned version + prompt template), `condition` (contains / equals / matches on a template, branches "true"/"false"), `router` (a model picks one route key) and `output` steps, joined by edges (`branch` set after conditions and routers). `workflowProblems()` in `runtime/workflows.ts` is the single source of graph rules (one start, no loops, reachable steps, branches, template references only to upstream steps, no template syntax beyond `{{input}}` and `{{nodes.<id>.output}}`).
+- A run walks the graph: a step is ready when all incoming edges are settled; it runs if any is active, else it's skipped. Agent steps are created with `createSession` and polled until idle; their last `agent.message` is the step's output. Runs live in `agentos.workflow_executions` (ids `wfrun_`).
+- The builder (`runtime/builder.ts`) sends the conversation, the current plan and a long system prompt to the builder model and expects one JSON object `{reply, changes, plan}`. The plan is checked with zod and `planProblems()` (which reuses `workflowProblems`); on failure the model gets the problems back once. Positions the person arranged are kept across revisions. `applyPlan()` creates or updates the environment, agents (by plan key) and workflow, recording ids in `builder_chats.applied`.
+- The mock model (`tests/conformance/mock-openrouter.mjs`) answers builder and router prompts, so `workflows.test.ts` runs offline.
 
 ## 5. Changing the database
 

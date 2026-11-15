@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import type { BuilderChat, Workflow, WorkflowRun } from "@agentos/types";
 import type { Agent, CredentialAuth, Deployment, DeploymentRun, Environment, FileMetadata, Session, SessionEvent, SessionThread, Vault, VaultCredential } from "@agentos/types";
 
 /**
@@ -290,6 +291,114 @@ export class Store {
       if (!rows[0]) return null;
       void this.sql`update agentos.api_keys set last_used_at = now() where id = ${rows[0].id}`.catch(() => {});
       return { id: rows[0].id as string, workspace_id: rows[0].workspace_id as string, created_by: (rows[0].created_by as string | null) ?? null };
+    },
+  };
+
+  /* ------------------------------------------------------------- workflows */
+
+  workflows = {
+    insert: async (w: Workflow): Promise<void> => {
+      const { id, version, created_at, updated_at, archived_at, type: _t, ...spec } = w;
+      await this.sql.begin(async (tx) => {
+        await tx`
+          insert into agentos.workflows (id, workspace_id, latest_version, created_at, updated_at, archived_at)
+          values (${id}, ${this.workspaceId}, ${version}, ${created_at}, ${updated_at}, ${archived_at})
+          on conflict (id) do update set latest_version = excluded.latest_version, updated_at = excluded.updated_at`;
+        await tx`insert into agentos.workflow_versions (workflow_id, version, spec, created_at) values (${id}, ${version}, ${tx.json(asJson(spec))}, ${updated_at})`;
+      });
+    },
+    get: async (id: string, version?: number): Promise<Workflow | null> => {
+      const r = version
+        ? await this.sql`
+            select w.id, w.created_at, w.archived_at, v.version, v.spec, v.created_at as updated_at
+            from agentos.workflows w join agentos.workflow_versions v on v.workflow_id = w.id
+            where w.id = ${id} and v.version = ${version} and w.workspace_id = ${this.workspaceId}`
+        : await this.sql`
+            select w.id, w.created_at, w.archived_at, v.version, v.spec, v.created_at as updated_at
+            from agentos.workflows w join agentos.workflow_versions v on v.workflow_id = w.id and v.version = w.latest_version
+            where w.id = ${id} and w.workspace_id = ${this.workspaceId}`;
+      return r[0] ? toWorkflow(r[0]) : null;
+    },
+    list: async ({ includeArchived }: { includeArchived: boolean }): Promise<Workflow[]> => {
+      const rows = await this.sql`
+        select w.id, w.created_at, w.archived_at, v.version, v.spec, v.created_at as updated_at
+        from agentos.workflows w join agentos.workflow_versions v on v.workflow_id = w.id and v.version = w.latest_version
+        where w.workspace_id = ${this.workspaceId} and (${includeArchived} or w.archived_at is null)
+        order by w.created_at desc`;
+      return rows.map(toWorkflow);
+    },
+    versions: async (id: string): Promise<Workflow[]> => {
+      const rows = await this.sql`
+        select w.id, w.created_at, w.archived_at, v.version, v.spec, v.created_at as updated_at
+        from agentos.workflows w join agentos.workflow_versions v on v.workflow_id = w.id
+        where w.id = ${id} and w.workspace_id = ${this.workspaceId} order by v.version desc`;
+      return rows.map(toWorkflow);
+    },
+    /** Positions only: saved into the current version without making a new one. */
+    saveLayout: async (id: string, version: number, nodes: Workflow["nodes"]): Promise<void> => {
+      await this.sql`
+        update agentos.workflow_versions v set spec = jsonb_set(v.spec, '{nodes}', ${this.sql.json(asJson(nodes))})
+        from agentos.workflows w where w.id = v.workflow_id and w.workspace_id = ${this.workspaceId} and v.workflow_id = ${id} and v.version = ${version}`;
+    },
+    archive: async (id: string, at: string): Promise<void> => {
+      await this.sql`update agentos.workflows set archived_at = ${at} where id = ${id} and workspace_id = ${this.workspaceId}`;
+    },
+  };
+
+  workflowRuns = {
+    insert: async (r: WorkflowRun): Promise<void> => {
+      await this.sql`
+        insert into agentos.workflow_executions (id, workspace_id, workflow_id, workflow_version, status, input, output, error, steps, cost_usd, trigger, created_at, ended_at)
+        values (${r.id}, ${this.workspaceId}, ${r.workflow_id}, ${r.workflow_version}, ${r.status}, ${r.input}, ${r.output},
+          ${r.error ? this.sql.json(asJson(r.error)) : null}, ${this.sql.json(asJson(r.steps))}, ${r.cost_usd}, ${this.sql.json(asJson(r.trigger))},
+          ${r.created_at}, ${r.ended_at})`;
+    },
+    update: async (r: WorkflowRun): Promise<void> => {
+      await this.sql`
+        update agentos.workflow_executions set status = ${r.status}, output = ${r.output}, error = ${r.error ? this.sql.json(asJson(r.error)) : null},
+          steps = ${this.sql.json(asJson(r.steps))}, cost_usd = ${r.cost_usd}, ended_at = ${r.ended_at}
+        where id = ${r.id} and workspace_id = ${this.workspaceId}`;
+    },
+    get: async (id: string): Promise<WorkflowRun | null> => {
+      const rows = await this.sql`select * from agentos.workflow_executions where id = ${id} and workspace_id = ${this.workspaceId}`;
+      return rows[0] ? toWorkflowRun(rows[0]) : null;
+    },
+    list: async (f: { workflowId?: string; limit?: number }): Promise<WorkflowRun[]> => {
+      const rows = await this.sql`
+        select * from agentos.workflow_executions where workspace_id = ${this.workspaceId}
+          and (${f.workflowId ?? null}::text is null or workflow_id = ${f.workflowId ?? null})
+        order by created_at desc limit ${f.limit ?? 200}`;
+      return rows.map(toWorkflowRun);
+    },
+    /** Runs left "running" by a previous process (all workspaces). */
+    failInterrupted: async (): Promise<number> => {
+      const rows = await this.sql`
+        update agentos.workflow_executions set status = 'failed', ended_at = now(),
+          error = '{"type":"api_error","message":"The API restarted while this run was in progress"}'::jsonb
+        where status = 'running' returning id`;
+      return rows.length;
+    },
+  };
+
+  builderChats = {
+    upsert: async (b: BuilderChat): Promise<void> => {
+      await this.sql`
+        insert into agentos.builder_chats (id, workspace_id, title, model, messages, plan, applied, created_at, updated_at)
+        values (${b.id}, ${this.workspaceId}, ${b.title}, ${b.model}, ${this.sql.json(asJson(b.messages))}, ${b.plan ? this.sql.json(asJson(b.plan)) : null},
+          ${b.applied ? this.sql.json(asJson(b.applied)) : null}, ${b.created_at}, ${b.updated_at})
+        on conflict (id) do update set title = excluded.title, model = excluded.model, messages = excluded.messages, plan = excluded.plan,
+          applied = excluded.applied, updated_at = excluded.updated_at`;
+    },
+    get: async (id: string): Promise<BuilderChat | null> => {
+      const rows = await this.sql`select * from agentos.builder_chats where id = ${id} and workspace_id = ${this.workspaceId}`;
+      return rows[0] ? toBuilderChat(rows[0]) : null;
+    },
+    list: async (): Promise<BuilderChat[]> => {
+      const rows = await this.sql`select * from agentos.builder_chats where workspace_id = ${this.workspaceId} order by updated_at desc limit 100`;
+      return rows.map(toBuilderChat);
+    },
+    delete: async (id: string): Promise<void> => {
+      await this.sql`delete from agentos.builder_chats where id = ${id} and workspace_id = ${this.workspaceId}`;
     },
   };
 
@@ -688,6 +797,51 @@ function toThread(r: postgres.Row): SessionThread {
     created_at: iso(r.created_at)!,
     updated_at: iso(r.updated_at)!,
     archived_at: iso(r.archived_at),
+  };
+}
+
+function toWorkflow(r: postgres.Row): Workflow {
+  const spec = r.spec as Omit<Workflow, "type" | "id" | "version" | "created_at" | "updated_at" | "archived_at">;
+  return {
+    type: "workflow",
+    id: r.id,
+    version: r.version,
+    ...spec,
+    created_at: iso(r.created_at)!,
+    updated_at: iso(r.updated_at)!,
+    archived_at: iso(r.archived_at),
+  };
+}
+
+function toWorkflowRun(r: postgres.Row): WorkflowRun {
+  return {
+    type: "workflow_run",
+    id: r.id,
+    workflow_id: r.workflow_id,
+    workflow_version: r.workflow_version,
+    status: r.status,
+    input: r.input,
+    output: r.output ?? null,
+    error: r.error ?? null,
+    steps: r.steps ?? {},
+    cost_usd: Number(r.cost_usd ?? 0).toFixed(6),
+    trigger: r.trigger,
+    created_at: iso(r.created_at)!,
+    ended_at: iso(r.ended_at),
+  };
+}
+
+function toBuilderChat(r: postgres.Row): BuilderChat {
+  return {
+    type: "builder_chat",
+    id: r.id,
+    title: r.title,
+    model: r.model,
+    messages: r.messages ?? [],
+    plan: r.plan ?? null,
+    applied: r.applied ?? null,
+    created_at: iso(r.created_at)!,
+    updated_at: iso(r.updated_at)!,
   };
 }
 
