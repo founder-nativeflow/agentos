@@ -9,6 +9,8 @@
  *   agentos status                    show what's configured
  *   agentos run <agent> "<message>"   start a session and follow it live (see run.ts)
  *   agentos cloud init | check         cloud credentials (see cloud.ts, docs/cloud-setup.md)
+ *   agentos remote add|list|remove     other AgentOS installs to push to (see push.ts)
+ *   agentos push <agent> --to <remote> copy an agent version (+ environment, deployment) there
  */
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -25,6 +27,7 @@ import {
 } from "../../api/src/lib/config.ts";
 import { runCommand } from "./run.ts";
 import { cloudCommand } from "./cloud.ts";
+import { pushCommand, remoteCommand } from "./push.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -166,13 +169,15 @@ const commands: Record<string, () => unknown> = {
   status,
   run: runCommand,
   cloud: () => cloudCommand(sub),
+  remote: () => remoteCommand(sub, arg, process.argv[5]),
+  push: () => pushCommand(),
   admin: () => (sub === "reset-password" ? resetPassword() : console.log("Usage: agentos admin reset-password")),
   keys: () => (sub === "create" ? createKey(arg) : console.log("Usage: agentos keys create <name>")),
 };
 
 const fn = cmd ? commands[cmd] : undefined;
 if (!fn) {
-  console.log('Usage: agentos <init | dev | status | run <agent> "<message>" | cloud init|check | admin reset-password | keys create <name>>');
+  console.log('Usage: agentos <init | dev | status | run <agent> "<message>" | cloud init|check | remote add|list|remove | push <agent> --to <remote> | admin reset-password | keys create <name>>');
   process.exit(cmd ? 1 : 0);
 }
 Promise.resolve(fn()).catch((err: Error) => {

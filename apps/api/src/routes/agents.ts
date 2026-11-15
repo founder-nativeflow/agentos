@@ -140,8 +140,11 @@ agents.post("/", async (c) => {
 });
 
 agents.get("/:id", async (c) => {
-  const agent = await c.get("store").agents.get(c.req.param("id"));
-  if (!agent) throw notFound("Agent", c.req.param("id"));
+  // CMA: ?version=N retrieves a specific version (default: latest).
+  const v = c.req.query("version");
+  const store = c.get("store");
+  const agent = v ? await store.agents.getVersion(c.req.param("id"), Number(v)) : await store.agents.get(c.req.param("id"));
+  if (!agent) throw notFound("Agent", v ? `${c.req.param("id")} version ${v}` : c.req.param("id"));
   return c.json(agent);
 });
 

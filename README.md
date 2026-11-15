@@ -65,6 +65,8 @@ for await (const event of await client.beta.sessions.events.stream(session.id)) 
 | `pnpm agentos status` | Show admin, API keys (hints only) and OpenRouter status |
 | `pnpm agentos run <agent> "<message>" [--env ID] [--budget 1.50] [--file PATH]… [--yes] [--interactive]` | Start a session and follow it live in the terminal; asks before tools that need approval (`--yes` allows them), Ctrl-C interrupts |
 | `pnpm agentos keys create <name>` | Create another API key |
+| `pnpm agentos remote add <name> <url> --key-stdin` · `remote list` · `remote remove <name>` | Other AgentOS installs (e.g. AgentOS Cloud) you can push to; the key is checked before it's saved (0600 file) |
+| `pnpm agentos push <agent> --to <remote> [--version N] [--env <name>] [--deployment <id>] [--activate] [--dry-run]` | Copy an agent version to the remote, with its environment and a deployment if asked. Updates only what changed (an unchanged agent makes no new version); secrets are never copied (vaults are matched by name, and a missing one stops the push before any write); new deployments arrive paused unless `--activate` |
 | `pnpm agentos admin reset-password` | Reset the admin password (signs everyone out) |
 
 ## Repository layout
@@ -80,6 +82,7 @@ tests/conformance   Official Anthropic SDK run against AgentOS
 ## Tests
 ```bash
 pnpm typecheck
+bash tests/conformance/push-scenario.sh       # agentos push between two AgentOS instances (21 checks)
 bash tests/conformance/runtime-scenarios.sh   # restart keeps context, budget resume, sub-agent approval across a restart, compaction
 AGENTOS_RUNTIME=classic pnpm test:conformance # the same SDK suite on the original loop
 AGENTOS_TEST_AUTH=supabase pnpm test:conformance  # the whole suite in Supabase Auth mode (users, workspaces, DB keys)
